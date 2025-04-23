@@ -1,0 +1,20 @@
+Failure # 1 (occurred at 2025-04-23_07-39-33)
+[36mray::ImplicitFunc.train()[39m (pid=21286, ip=127.0.0.1, actor_id=ff83e5230c062b31449cd50e01000000, repr=func)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/ray/tune/trainable/trainable.py", line 327, in train
+    result = self.step()
+             ^^^^^^^^^^^
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/ray/tune/trainable/function_trainable.py", line 116, in step
+    training_result: Optional[_TrainingResult] = session.get_next()
+                                                 ^^^^^^^^^^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/ray/train/_internal/session.py", line 286, in get_next
+    result = self.result_queue.get(
+             ^^^^^^^^^^^^^^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/queue.py", line 180, in get
+    self.not_empty.wait(remaining)
+  File "/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/threading.py", line 359, in wait
+    gotit = waiter.acquire(True, timeout)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ray.exceptions.TaskCancelledError: Task: TaskID(ab412944301a8c3fff83e5230c062b31449cd50e01000000) was cancelled.

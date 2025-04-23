@@ -1,0 +1,23 @@
+Failure # 1 (occurred at 2025-04-23_07-24-39)
+[36mray::ImplicitFunc.train()[39m (pid=18426, ip=127.0.0.1, actor_id=68666afcc7d306b99c67502a01000000, repr=func)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/ray/tune/trainable/trainable.py", line 330, in train
+    raise skipped from exception_cause(skipped)
+  File "/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/ray/air/_internal/util.py", line 107, in run
+    self._ret = self._target(*self._args, **self._kwargs)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/ray/tune/trainable/function_trainable.py", line 45, in <lambda>
+    training_func=lambda: self._trainable_func(self.config),
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/ray/tune/trainable/function_trainable.py", line 261, in _trainable_func
+    output = fn()
+             ^^^^
+  File "/Users/viktor/Documents/Spectral/differentiable-mel-spectrogram/main.py", line 70, in run_experiment
+    net, history = train.train_model(
+                   ^^^^^^^^^^^^^^^^^^
+  File "/Users/viktor/Documents/Spectral/differentiable-mel-spectrogram/train.py", line 37, in train_model
+    inputs, labels = inputs.to(device), labels.to(device)
+                     ^^^^^^^^^^^^^^^^^
+TypeError: Cannot convert a MPS Tensor to float64 dtype as the MPS framework doesn't support float64. Please use float32 instead.

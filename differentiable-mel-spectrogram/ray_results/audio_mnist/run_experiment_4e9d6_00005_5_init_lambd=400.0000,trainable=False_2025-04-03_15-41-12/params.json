@@ -1,0 +1,23 @@
+{
+  "augment": false,
+  "batch_size": 64,
+  "checkpoint_path": "/home/john/gits/differentiable-time-frequency-transforms/weights/Cnn6_mAP=0.343.pth",
+  "dataset_name": "audio_mnist",
+  "device": "cuda:0",
+  "energy_normalize": true,
+  "hop_length": 80,
+  "init_lambd": 400.0,
+  "lr_model": 0.0001,
+  "lr_tf": 1.0,
+  "max_epochs": 1000,
+  "model_name": "mel_linear_net",
+  "n_mels": 64,
+  "n_points": 8000,
+  "normalize_window": false,
+  "optimized": true,
+  "optimizer_name": "adam",
+  "patience": 100,
+  "pretrained": false,
+  "resample_rate": 8000,
+  "trainable": false
+}

@@ -1,0 +1,21 @@
+{
+  "batch_size": 128,
+  "center_offset": false,
+  "dataset_name": "time_frequency",
+  "device": "mps",
+  "hop_length": 1,
+  "init_lambd": 31.9,
+  "lr_model": 0.001,
+  "lr_tf": 1,
+  "max_epochs": 1000,
+  "model_name": "linear_net",
+  "n_points": 128,
+  "n_samples": 5000,
+  "noise_std": 0.5,
+  "normalize_window": false,
+  "optimized": false,
+  "optimizer_name": "sgd",
+  "patience": 100,
+  "sigma_ref": 6.38,
+  "trainable": false
+}

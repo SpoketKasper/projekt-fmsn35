@@ -1,0 +1,2 @@
+loss,lambd_est,valid_loss,valid_acc,best_valid_acc,best_valid_loss,energy,best_lambd_est,timestamp,checkpoint_dir_name,done,training_iteration,trial_id,date,time_this_iter_s,time_total_s,pid,hostname,node_ip,time_since_restore,iterations_since_restore
+0.8526201607393367,3.6119766235351562,0.22357789427042007,0.9441002160310745,0.9441002160310745,0.22357789427042007,989962.6,3.6119766235351562,1745386760,,False,1,41d3d_00001,2025-04-23_07-39-20,17.812387228012085,17.812387228012085,21289,viktor.local,127.0.0.1,17.812387228012085,1
