@@ -1,2 +1,5 @@
 venv/
 .DS_store
+
+##Audio
+.wav
