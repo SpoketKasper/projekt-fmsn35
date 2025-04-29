@@ -275,34 +275,36 @@ class fastDSTFT(nn.Module):
         relevant_splines = torch.tensor(relevant_splines, dtype=torch.long).T 
         # (n_relevant_splines, T)
         # Fetch relevant spline FFTs for each frame (with cool indexing)
-        spline_stfts = self.spline_stfts[:, relevant_splines]
+        expanded_spline_stfts = self.spline_stfts[:, relevant_splines]
         # (n_frequencies, n_relevant_splines, T)
         
         # Modulate spline FFTs
         modulation_factors = torch.exp(-1j * 2 * torch.pi * torch.arange(self.F).unsqueeze(1) / self.N * self.offsets.unsqueeze(0)).unsqueeze(2)
         # (n_frequencies, n_relevant_splines, 1)
-        modulated_stfts = spline_stfts * modulation_factors
+        #modulated_stfts = expanded_spline_stfts * modulation_factors
         # (n_frequencies, n_relevant_splines, T)
         #self.times1.append(toc(print_elapsed=False))
 
         #tic()
-        # Extract window lengths (lambdas)
+        # Extract window lengths (lambdas) and compute coefficients
         lambdas_ = self.window_lengths
         # (n_frequencies, T)
-
-        # Compute coefficients
         coeffs = self.coefficients(lambdas_)  # self.get_beta_coefficients(lambdas_)  
         # (n_frequencies, n_relevant_splines, T)
     
         # Calculate the STFT components for all frames
-        stft_components = coeffs * modulated_stfts
+        #stft_components = coeffs * modulated_stfts
         # (n_frequencies, n_relevant_splines, T)
 
         # Sum over the relevant splines for each frame
-        spectrogram = stft_components.sum(dim=1)  
+        #spectrogram = stft_components.sum(dim=1)  
         # (n_frequencies, T)
         #self.times2.append(toc(print_elapsed=False))
 
+        # Sum the scaled splines for each frame
+        #spectrogram = (coeffs * modulated_stfts).sum(dim=1)
+        # Doing everything in one step seems faster. Factor order seems to matter for speed.
+        spectrogram = (expanded_spline_stfts * modulation_factors * coeffs).sum(dim=1)
         return spectrogram
 
     # Low memory version, never stores large arrays (only utilizes spline precomputation)
@@ -328,7 +330,7 @@ class fastDSTFT(nn.Module):
             # Modulate the spline FFTs
             modulation_factors = torch.exp(-1j*2*torch.pi* torch.arange(self.F)/self.N *self.offsets.unsqueeze(1)).transpose(0, 1)  
             # (n_frequencies, n_relevant_splines)
-            modulated_stfts = spline_stfts* modulation_factors  
+            #modulated_stfts = spline_stfts* modulation_factors  
             # (n_frequencies, n_relevant_splines)
             
             # Get the coefficient from the window lengths   
@@ -337,11 +339,12 @@ class fastDSTFT(nn.Module):
             # (n_frequencies, n_relevant_splines)
 
             # Compute the STFT components for all frequencies
-            stft_components = coeffs* modulated_stfts  
+            #stft_components = coeffs* modulated_stfts  
             # (n_frequencies, n_relevant_splines)
 
             # Calculate the spectrogram entries for this time step
-            spectrogram[:, frame_idx] += stft_components.sum(dim=1)
+            #spectrogram[:, frame_idx] += stft_components.sum(dim=1)
+            spectrogram[:, frame_idx] += (spline_stfts * modulation_factors * coeffs).sum(dim=1)
         return spectrogram
 
     # Put window lengths back within the allowed range during optimization
