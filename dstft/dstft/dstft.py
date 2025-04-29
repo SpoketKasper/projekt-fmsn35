@@ -29,12 +29,13 @@ from scipy.signal import stft
 from scipy.stats import beta
 from scipy.interpolate import BSpline
 import torch.nn.functional as F
+import cv2
 class fastDSTFT(nn.Module):
     def __init__(self, x,
                     initial_win_length: float,   
                     support: int,                
                     stride: int, 
-                    warm_start: bool = False,
+                    #warm_start: bool = False,
                     window_function: str = 'beta',
                     mel_filter: bool = False,
                     n_mels: int = None,
@@ -178,9 +179,54 @@ class fastDSTFT(nn.Module):
         #self.prepare_for_beta_coefficients(self.offsets)
         self.precomputed = True
 
+    # Warm start, not super reliable or well motivated right now
+    def enforce_ordering(self, value):  # helper function for warm start
+        stride = self.stride
+        margin = 0  # [0, stride)
+        for i in range(value.shape[0]):  # Iterate over rows
+            # too large from the left
+            last_left_edge = -torch.inf
+            for j in range(value.shape[1]):  # Go right over columns
+                if stride*j -value[i, j]/2 -margin < last_left_edge:
+                    value[i, j] = 2*(stride*j -last_left_edge -margin)
+                last_left_edge = stride*j -value[i, j]/2
+            # too large from the right
+            last_right_edge = torch.inf
+            for j in range(value.shape[1] - 1, -1, -1): # Go left over columns
+                if stride*j +value[i, j]/2 +margin > last_right_edge:
+                    value[i, j] = 2*(last_right_edge -margin -stride*j)
+                last_right_edge = stride*j +value[i, j]/2
+        return value
+    def warm_start(self):
+        with torch.no_grad():
+            self.window_lengths.data.fill_(self.min_length)
+        image = np.array(self().squeeze(0).detach())
+        #plt.figure(figsize=[7, 5])
+        #plt.imshow(image, cmap='jet', aspect='auto', interpolation='nearest')
+        #plt.colorbar()
+        #plt.show()
+
+        kernel_size = (0, 0)
+        sigma = 2
+        smoothed_image = cv2.GaussianBlur(image, kernel_size, sigmaX=sigma, sigmaY=0)
+        left_right_derivative = np.diff(smoothed_image, axis=1, append=smoothed_image[:, -1:])
+        #left_right_2nd_derivative = np.abs(np.diff(left_right_derivative, axis=1, append=left_right_derivative[:, -1:]))
+        #derivsum = np.abs(left_right_derivative)+np.abs(left_right_2nd_derivative)
+        good_window_length = 1/(np.abs(left_right_derivative)+1e-7)
+        good_window_length = 200*good_window_length
+        good_window_length[good_window_length < 100] = 100
+        good_window_length[good_window_length > 1000] = 1000
+        sigma = 1
+        smoothed_window_length = cv2.GaussianBlur(good_window_length, kernel_size, sigma)
+        with torch.no_grad():
+            smoothed_window_length = self.enforce_ordering(smoothed_window_length)
+            self.window_lengths.data.copy_(torch.tensor(smoothed_window_length))
+    
     # Spline coefficients for building larger windows
     def coefficients(self, lambda_):  # get the spline coefficients
         normalized_offsets = self.offsets / self.N
+        # (n_relevant_splines)
+
         # The Greville abscissae are the centers of the splines! Kind of, boundary effect?
         if self.window_function == 'beta':
             a = 1/2* ( (3000/lambda_)**2 -1 ).unsqueeze(1)
@@ -197,10 +243,20 @@ class fastDSTFT(nn.Module):
             pdf = torch.exp(log_pdf)
             return pdf
         elif self.window_function == 'hann':
-            half_width = lambda_ / (2 * self.N)
-            out = 0.5 * (1 + torch.cos(np.pi * (normalized_offsets - 0.5) / half_width))
-            out[np.abs(normalized_offsets - 0.5) > half_width] = 0
-            out[np.abs(normalized_offsets - 0.5) > half_width] = 0
+            half_width = (lambda_/(2 * self.N)).unsqueeze(1)
+            # (n_frequencies, 1, T)  for normal forward
+
+            normalized_offsets = normalized_offsets.unsqueeze(0)
+            if len(half_width.shape)==3:  # if a has all time steps, we need to add a dimension
+                normalized_offsets = normalized_offsets.unsqueeze(2)
+            # (1, n_relevant_splines, 1)  for normal forward
+
+            # normalized offsets is already centered
+            out = 0.5 * (1 + torch.cos(torch.pi * normalized_offsets / half_width))
+            out[torch.abs(normalized_offsets) > half_width] = 0
+            out = out / out.sum(dim=1, keepdim=True)
+            # (n_frequencies, n_relevant_splines, T)  for normal forward
+
             return out
         else:
             raise NotImplementedError(f"Window function '{self.window_function}' not implemented.")
@@ -213,16 +269,15 @@ class fastDSTFT(nn.Module):
     def stft(self):  # fast, utilizes all precomputations
         if not self.precomputed:
             raise RuntimeError("Precompute the splines first using the precompute() method.")
-
-        #tic()
-        # Extract relevant splines for each frame
-        relevant_splines = torch.stack([torch.tensor(self.spline_map.get(frame_idx, []), dtype=torch.long) for frame_idx in range(self.T)], dim=0).T  
+        
+        # Build tensor of relevant spline indices
+        relevant_splines = [self.spline_map.get(t, []) for t in range(self.T)]
+        relevant_splines = torch.tensor(relevant_splines, dtype=torch.long).T 
         # (n_relevant_splines, T)
-        spline_stfts = torch.zeros((self.F, relevant_splines.shape[0], self.T), dtype=torch.complex64)
-        for T in range(self.T):  # Fetch relevant spline FFTs for each frame
-            spline_stfts[:, :, T] = self.spline_stfts[:, relevant_splines[:, T]]
+        # Fetch relevant spline FFTs for each frame (with cool indexing)
+        spline_stfts = self.spline_stfts[:, relevant_splines]
         # (n_frequencies, n_relevant_splines, T)
-
+        
         # Modulate spline FFTs
         modulation_factors = torch.exp(-1j * 2 * torch.pi * torch.arange(self.F).unsqueeze(1) / self.N * self.offsets.unsqueeze(0)).unsqueeze(2)
         # (n_frequencies, n_relevant_splines, 1)
@@ -238,7 +293,7 @@ class fastDSTFT(nn.Module):
         # Compute coefficients
         coeffs = self.coefficients(lambdas_)  # self.get_beta_coefficients(lambdas_)  
         # (n_frequencies, n_relevant_splines, T)
-
+    
         # Calculate the STFT components for all frames
         stft_components = coeffs * modulated_stfts
         # (n_frequencies, n_relevant_splines, T)
