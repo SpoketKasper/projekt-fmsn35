@@ -23,6 +23,11 @@ def toc(print_elapsed=True):
         print(f"Elapsed time: {elapsed:.6f} seconds")
     return elapsed
 
+def float_complex_mult(float_tensor, complex_tensor):
+    real_result = float_tensor * complex_tensor.real
+    imag_result = float_tensor * complex_tensor.imag
+    return torch.complex(real_result, imag_result)
+
 import torch.utils.bottleneck as bottleneck
 import numpy as np
 from scipy.signal import stft
@@ -30,154 +35,55 @@ from scipy.stats import beta
 from scipy.interpolate import BSpline
 import torch.nn.functional as F
 import cv2
-class fastDSTFT(nn.Module):
-    def __init__(self, x,
+
+class fastDSTFT(nn.Module):  # batches
+    def __init__(self, x_sample,
                     initial_win_length: float,   
                     support: int,                
                     stride: int, 
-                    #warm_start: bool = False,
                     window_function: str = 'beta',
-                    mel_filter: bool = False,
-                    n_mels: int = None,
-                    spline_density: int = 1,  # number of splines per stride
-                    spline_degree: int = 3,  # degree of the spline
-                    #win_p: str = None,
-                    #stride_p: str = None,
-                    #win_requires_grad: bool = True,
-                    #stride_requires_grad: bool = True,
-                    win_min = None,
-                    win_max = None,
-                    #stride_min = None,
-                    #stride_max = None,    
-                    #tapering_function: str = 'hann',
-                    sr : int = 16_000,
+                    spline_density: int = 2,  # number of splines per stride, 2 is good
+                    spline_degree: int = 3,  # degree of the spline, 5 is good
+                    win_min = 100,
+                    win_max = 1000,
+                    sr: int = 16_000,
                     ):
-        super().__init__()     
-        
-        # Constants and hyperparameters
-        self.x = x
-        self.sr = sr
-        self.eps = torch.finfo(x.dtype).eps
-        self.device = x.device
-        self.dtype = x.dtype
+        super().__init__() 
 
+        # About x
+        self.x = x_sample
+        self.L = x_sample.shape[-1]
+        self.B = x_sample.shape[0]                                                                 # batch size  
+        self.sr = sr
+        self.eps = torch.finfo(x_sample.dtype).eps
+        self.device = x_sample.device
+        self.dtype = x_sample.dtype
+
+        # About the frames
         self.stride = stride
         self.N = support                                                                    # support size
-        self.support = support
-        self.T = int(1 + torch.div(x.shape[-1] - self.N, stride, rounding_mode='floor'))    # time steps       
+        self.T = int(1 + torch.div(self.L - self.N, stride, rounding_mode='floor'))    # time steps       
         self.F = int(1 + self.N/2)                                                          # nb of frequencies
-        #self.L = x.shape[-1]                                                                # signal length
-        #self.B = x.shape[0]                                                                 # batch size
+        self.x_useful_length = (self.N-self.stride)+self.T*self.stride  # we might miss some points in the end
+        self.min_length = win_min
+        self.max_length = win_max
+        self.window_function = window_function
+        self.window_lengths = nn.Parameter(torch.full((self.F, self.T), initial_win_length, dtype=self.dtype, device=self.device), requires_grad=True)
         
-        self.frame_starts = torch.arange(self.T) * self.stride  # Starting indices of the frames
-        self.frame_centers = self.frame_starts + self.support // 2  # Centers of the frames
-        self.frame_ends = self.frame_starts + self.support  # Ending indices of the frames
-        self.spline_centers = None
-        self.spline_map = None
+        # Spline stuff
         self.spline_degree = spline_degree
         self.spline_density = spline_density
-        if win_min is None: self.min_length = 100
-        if win_max is None: self.max_length = 1000
-        self.window_function = window_function
-        self.precomputed = False
-        #self.warm_start = warm_start
-        #self.times1 = []
-        #self.times2 = []
-
-        # window_lengths
-        if mel_filter:
-            win_length_size = (n_mels, self.T)
-        else: 
-            win_length_size = (self.F, self.T)
-        self.window_lengths = nn.Parameter(torch.full(win_length_size, initial_win_length, dtype=self.dtype, device=self.device), requires_grad=True)
-
-        # stft values of splines
-        self.spline_stfts = None
-
-    # Precomputation of STFT with spline windows
-    def generate_spline(self):
-        # Generate a B-spline of given degree over a support
-        num_knots = self.spline_degree +2
-        spline_support = int((self.spline_degree+1)*self.stride/self.spline_density)
-        knots = np.linspace(0, spline_support, num_knots)
-        #print(knots)
-        knots = knots[1:-1]  # remove the endpoints
-        knots = np.concatenate((
-            [0] * (self.spline_degree+1),  #[knots[0]] * (spline_degree+1),  # left clamped
-            knots,
-            [spline_support] * (self.spline_degree+1)#[knots[-1]] * (spline_degree+1)  # right clamped
-        ))
-        num_basis = len(knots) - self.spline_degree  - 1
-        t = np.linspace(0, spline_support, spline_support)
-        coefs = np.zeros(num_basis)
-        coefs[num_basis//2] = 1
-        bspline = BSpline(knots, coefs, self.spline_degree)(t)
-
-        return bspline
-    def zero_pad(self, arr, target_length):
-        # Ensure arr is 1D
-        if arr.ndim == 2:
-            arr = arr.squeeze()
-        assert arr.ndim == 1, f"Expected 1D array after squeeze, got shape {arr.shape}"
-
-        pad_len = target_length - arr.size(0)
-        if pad_len < 0:
-            raise ValueError(f"Target length {target_length} smaller than array length {arr.size(0)}")
-
-        pad_left = pad_len // 2
-        pad_right = pad_len - pad_left
-
-        return F.pad(arr, (pad_left, pad_right), mode='constant', value=0)
-    def precompute(self):  # calculate the stft with spline windows to later be combined 
-        # Generate spline basis
-        spline_basis = self.generate_spline()
-
-        # Length of the B-spline basis function
-        basis_length = len(spline_basis)
-
-        # Compute spline centers based on stride, density, and spline basis length
-        # Adjust the center so that it accounts for the length of the B-spline
-        self.n_splines = int(1 + (len(self.x[0])-basis_length) * self.spline_density / self.stride)
-        self.spline_vals_size = (self.F, self.n_splines)
-        self.spline_stfts = torch.zeros((self.spline_vals_size[0], self.spline_vals_size[1]), dtype=torch.complex64)
-        self.spline_centers = (torch.arange(self.n_splines) * self.stride // self.spline_density) + (basis_length // 2)
-
-        # Calculate spline start and end indices based on the centers
-        spline_support = int((self.spline_degree+1)*self.stride/self.spline_density)
-        spline_starts = self.spline_centers - spline_support // 2
-        spline_ends = self.spline_centers + spline_support // 2
-
-        # Precompute frame starts and ends
-        frame_starts = self.frame_starts.unsqueeze(0)  # Shape: (1, T)
-        frame_ends = self.frame_ends.unsqueeze(0)  # Shape: (1, T)
-
-        # Create an overlap mask for which splines overlap with which frames
-        containment_mask = (spline_starts.unsqueeze(1) >= frame_starts) & (spline_ends.unsqueeze(1) <= frame_ends)
-        
-        # Store STFT results and prepare spline map
-        self.spline_map = {frame_idx: [] for frame_idx in range(self.T)}
-
-        for i, center in enumerate(self.spline_centers):
-            # Extract and pad spline window
-            start, end = spline_starts[i], spline_ends[i]
-            spline_window = self.x[:, start:end] * spline_basis
-            spline_window_padded = self.zero_pad(spline_window, self.N)
-
-            # Compute FFT
-            Zxx = torch.fft.fft(spline_window_padded)
-        
-            # Store STFT in self.spline_stfts
-            self.spline_stfts[:, i] = Zxx[:self.F]
-
-            # Update the spline map with relevant frame indices
-            relevant_frames = containment_mask[i].nonzero().flatten()  # Indices where the spline is contained within with a frame
-            for frame_idx in relevant_frames:
-                self.spline_map[frame_idx.item()].append(i)
-
-        # Calculate spline offsets in windows and prepare for beta coefficients
-        self.offsets = self.spline_centers[self.spline_map.get(0, [])] - self.frame_centers[0]  # (n_relevant_splines,)
-        #self.prepare_for_beta_coefficients(self.offsets)
-        self.precomputed = True
+        self.spline_stride = self.stride/self.spline_density
+        self.spline_support = int((self.spline_degree+1)*self.spline_stride)
+        self.n_splines = int(1 + (len(self.x[0])-self.spline_support) * self.spline_density / self.stride)
+        self.spline_centers = (torch.arange(self.n_splines) * self.stride // self.spline_density) + (self.spline_support // 2)
+        self.splines_per_frame = int(1+self.spline_density*(self.N-self.spline_support)/self.stride)
+        self.frame2splines = torch.arange(0, self.splines_per_frame).reshape(-1, 1) + torch.arange(0, self.T*spline_density, spline_density)
+        self.spline_stfts = torch.zeros((self.B, self.F, self.n_splines), dtype=torch.complex64)
+        # spline offsets in each frame
+        self.offsets = torch.arange(-self.N/2+self.spline_support/2, 
+                                    self.N/2-self.spline_support/2+self.spline_stride, 
+                                    self.spline_stride) 
 
     # Warm start, not super reliable or well motivated right now
     def enforce_ordering(self, value):  # helper function for warm start
@@ -201,11 +107,6 @@ class fastDSTFT(nn.Module):
         with torch.no_grad():
             self.window_lengths.data.fill_(self.min_length)
         image = np.array(self().squeeze(0).detach())
-        #plt.figure(figsize=[7, 5])
-        #plt.imshow(image, cmap='jet', aspect='auto', interpolation='nearest')
-        #plt.colorbar()
-        #plt.show()
-
         kernel_size = (0, 0)
         sigma = 2
         smoothed_image = cv2.GaussianBlur(image, kernel_size, sigmaX=sigma, sigmaY=0)
@@ -218,9 +119,9 @@ class fastDSTFT(nn.Module):
         good_window_length[good_window_length > 1000] = 1000
         sigma = 1
         smoothed_window_length = cv2.GaussianBlur(good_window_length, kernel_size, sigma)
+        ordered_window_length = self.enforce_ordering(smoothed_window_length)
         with torch.no_grad():
-            smoothed_window_length = self.enforce_ordering(smoothed_window_length)
-            self.window_lengths.data.copy_(torch.tensor(smoothed_window_length))
+            self.window_lengths.data.copy_(torch.tensor(ordered_window_length))
     
     # Spline coefficients for building larger windows
     def coefficients(self, lambda_):  # get the spline coefficients
@@ -255,97 +156,119 @@ class fastDSTFT(nn.Module):
             out = 0.5 * (1 + torch.cos(torch.pi * normalized_offsets / half_width))
             out[torch.abs(normalized_offsets) > half_width] = 0
             out = out / out.sum(dim=1, keepdim=True)
+            #mask = torch.abs(normalized_offsets) <= half_width
+            #out = torch.zeros((self.F, self.splines_per_frame, self.T), dtype=torch.float32)
+            #double_normalized_offsets = normalized_offsets / half_width
+            #out[mask] = 0.5 * (1 + torch.cos(torch.pi * double_normalized_offsets[mask]))
+            #out = out / out.sum(dim=1, keepdim=True)
             # (n_frequencies, n_relevant_splines, T)  for normal forward
 
             return out
         else:
             raise NotImplementedError(f"Window function '{self.window_function}' not implemented.")
 
-    # Fast version with a lot of precomputations (right now the same haha)
-    def forward(self):  # uses stft
-        stft = self.stft()
-        spec = stft.abs() + self.eps
-        return spec.unsqueeze(0)
-    def stft(self):  # fast, utilizes all precomputations
-        if not self.precomputed:
-            raise RuntimeError("Precompute the splines first using the precompute() method.")
-        
-        # Build tensor of relevant spline indices
-        relevant_splines = [self.spline_map.get(t, []) for t in range(self.T)]
-        relevant_splines = torch.tensor(relevant_splines, dtype=torch.long).T 
-        # (n_relevant_splines, T)
-        # Fetch relevant spline FFTs for each frame (with cool indexing)
-        expanded_spline_stfts = self.spline_stfts[:, relevant_splines]
-        # (n_frequencies, n_relevant_splines, T)
-        
-        # Modulate spline FFTs
-        modulation_factors = torch.exp(-1j * 2 * torch.pi * torch.arange(self.F).unsqueeze(1) / self.N * self.offsets.unsqueeze(0)).unsqueeze(2)
-        # (n_frequencies, n_relevant_splines, 1)
-        #modulated_stfts = expanded_spline_stfts * modulation_factors
-        # (n_frequencies, n_relevant_splines, T)
-        #self.times1.append(toc(print_elapsed=False))
+    # Forward pass
+    def forward(self):
+        self.compute_spline_stft()
+        #stft = self.stft()  # compute the stft by combining the splines
+        return self.stft().abs() + self.eps  # stft.abs() + self.eps  # compute the spectrogram 
+    def generate_bspline(self):  # doesnt quite work
+        c = int(self.spline_stride)
+        degree = int(self.spline_degree)
+        bspline = torch.ones(2*c, dtype=torch.float32)
+        length = c
 
-        #tic()
-        # Extract window lengths (lambdas) and compute coefficients
-        lambdas_ = self.window_lengths
-        # (n_frequencies, T)
-        coeffs = self.coefficients(lambdas_)  # self.get_beta_coefficients(lambdas_)  
-        # (n_frequencies, n_relevant_splines, T)
-    
-        # Calculate the STFT components for all frames
-        #stft_components = coeffs * modulated_stfts
-        # (n_frequencies, n_relevant_splines, T)
+        for p in range(1, degree + 1):
+            length += c
+            t = torch.arange(2*length, dtype=torch.float32)/2
 
-        # Sum over the relevant splines for each frame
-        #spectrogram = stft_components.sum(dim=1)  
-        # (n_frequencies, T)
-        #self.times2.append(toc(print_elapsed=False))
-
-        # Sum the scaled splines for each frame
-        #spectrogram = (coeffs * modulated_stfts).sum(dim=1)
-        # Doing everything in one step seems faster. Factor order seems to matter for speed.
-        spectrogram = (expanded_spline_stfts * modulation_factors * coeffs).sum(dim=1)
-        return spectrogram
-
-    # Low memory version, never stores large arrays (only utilizes spline precomputation)
-    def low_memory_forward(self):
-        stft = self.low_memory_stft()
-        spec = stft.abs() + self.eps
-        return spec.unsqueeze(0)
-    def low_memory_stft(self):
-        if not self.precomputed:
-            raise RuntimeError("Precompute the splines first using the precompute() method.")
-
-        # Initialize the spectrogram tensor (n_frames x n_frequencies)
-        spectrogram = torch.zeros(self.spline_vals_size[0], self.T, dtype=torch.complex64)
-
-        # Loop over all time steps
-        for frame_idx in range(self.T):
-            # Get the relevant splines for this frame from the precomputed mapping
-            relevant_splines = self.spline_map.get(frame_idx, [])
-            # Fetch relevant spline FFTs
-            spline_stfts = self.spline_stfts[:, relevant_splines]  
-            # (n_frequencies, n_relevant_splines)
-
-            # Modulate the spline FFTs
-            modulation_factors = torch.exp(-1j*2*torch.pi* torch.arange(self.F)/self.N *self.offsets.unsqueeze(1)).transpose(0, 1)  
-            # (n_frequencies, n_relevant_splines)
-            #modulated_stfts = spline_stfts* modulation_factors  
-            # (n_frequencies, n_relevant_splines)
+            left = torch.zeros(2*length, dtype=torch.float32)
+            right = torch.zeros(2*length, dtype=torch.float32)
             
-            # Get the coefficient from the window lengths   
-            lambdas_ = self.window_lengths[:, frame_idx]
-            coeffs = self.coefficients(lambdas_)  # self.get_beta_coefficients(lambdas_)  
-            # (n_frequencies, n_relevant_splines)
+            left[:-2*c] = bspline
+            right[2*c:] = bspline
+            bspline = (t * left + (((p + 1) * c) - t) * right) / (p * c)
+        # it is not centered, which is why we oversample by 2
+        bspline = bspline[::2]  # take every other element
+        bspline = torch.cat([bspline, torch.tensor([0])])   # add a zero      
+        return bspline
+    def generate_spline(self):
+        # Generate a B-spline of given degree over a support
+        num_knots = self.spline_degree +2
+        spline_support = self.spline_support
+        knots = torch.linspace(0, spline_support, steps=num_knots)
+        knots = knots[1:-1]  # remove the endpoints
+        knots = torch.cat((
+            torch.full((self.spline_degree + 1,), 0.0),
+            knots,
+            torch.full((self.spline_degree + 1,), spline_support)
+        ))
+        num_basis = len(knots) - self.spline_degree  - 1
+        t = torch.linspace(0, spline_support, steps=spline_support)
+        coefs = torch.zeros(num_basis)
+        coefs[num_basis//2] = 1
+        bspline = BSpline(knots, coefs, self.spline_degree)(t)
+        return bspline
+    def compute_spline_stft(self):
+        # Generate spline window
+        spline_basis = torch.tensor(self.generate_spline(), dtype=torch.float32)
+        # (spline_support,)
+        
+        # Compute start indices for all windows
+        start_positions = torch.arange(0, self.x_useful_length - self.spline_support + 1, self.spline_stride).round().long()  
+        # (T,)
 
-            # Compute the STFT components for all frequencies
-            #stft_components = coeffs* modulated_stfts  
-            # (n_frequencies, n_relevant_splines)
+        # Extract sliding windows using unfold
+        # input: (B, x_length) → (B, n_splines, spline_support)
+        idx = start_positions.unsqueeze(1) + torch.arange(self.spline_support, device=self.x.device)
+        x_unfolded = self.x[:, idx]
+        #x_unfolded = torch.stack([self.x[:, start:start+self.spline_support] for start in start_positions], dim=1)
 
-            # Calculate the spectrogram entries for this time step
-            #spectrogram[:, frame_idx] += stft_components.sum(dim=1)
-            spectrogram[:, frame_idx] += (spline_stfts * modulation_factors * coeffs).sum(dim=1)
-        return spectrogram
+        # Apply spline basis (broadcasting)
+        windowed_x = x_unfolded * spline_basis.view(1, 1, -1)
+        # (B, n_splines, spline_support)
+
+        # Zero-pad each frame to length N
+        pad_length = self.N - self.spline_support
+        windowed_x_padded = torch.nn.functional.pad(windowed_x, (0, pad_length)) 
+        # (B, n_splines, N)
+
+        # Compute FFT over last dimension
+        Zxx = torch.fft.fft(windowed_x_padded, dim=-1)  
+        # (B, n_splines, N)
+
+        # Keep only first F frequencies and transpose
+        self.spline_stfts = Zxx[:, :, :self.F].transpose(1, 2)
+        #return Zxx[:, :, :self.F].T
+        # (B, n_splines, F)
+    #@torch.compile
+    def combine_tensors(self, a, b, c):  # slower for some reason
+        return (a * b * c).sum(dim=2)
+        """temp = (a*b)
+        dim = temp.shape
+        temp2 = (temp.view(torch.float32).view(*dim, 2) * c.unsqueeze(-1)).sum(dim=2)
+        print(temp2.shape)
+        print(temp2.dtype)
+        return temp2.view_as_complex()"""
+    def stft(self):
+        # Compute preliminary STFT with spline windows (20% of computation)
+        #spline_stfts = self.compute_spline_stft()
+
+        # Build tensor of all splines with repetition (10% of computation)
+        expanded_spline_stfts = self.spline_stfts[:, :, self.frame2splines]  # so called "advanced" indexing
+        #expanded_spline_stfts = spline_stfts[:, self.frame2splines]
+        # (B, n_frequencies, n_relevant_splines, T)
+
+        # Get the modulation factors (1% of computation)
+        modulation_factors = torch.exp(-1j * 2 * torch.pi * torch.arange(self.F).unsqueeze(1) / self.N * self.offsets.unsqueeze(0)).unsqueeze(0).unsqueeze(-1)
+        # (1, n_frequencies, n_relevant_splines, 1)
+
+        # Get the spline coefficients from the window lengths (30% of computation)
+        coeffs = self.coefficients(self.window_lengths).unsqueeze(0)#.to(torch.complex64)
+        # (1, n_frequencies, n_relevant_splines, T)
+
+        # Calculate the STFT (40% of computation)
+        return self.combine_tensors(expanded_spline_stfts, modulation_factors, coeffs) #(expanded_spline_stfts * modulation_factors * coeffs).sum(dim=1)
 
     # Put window lengths back within the allowed range during optimization
     def put_windows_back(self):
@@ -364,7 +287,7 @@ class fastDSTFT(nn.Module):
             origin="lower", 
             cmap="jet",
             interpolation='nearest',
-            extent=[0, spec.shape[-1], 0, spec.shape[-2]])
+            )
         plt.ylabel("frequencies")
         plt.xlabel("frames")
         plt.colorbar(im, ax=ax)
@@ -384,29 +307,501 @@ class fastDSTFT(nn.Module):
             ax.set_ylabel("frequencies")
             ax.set_xlabel("frames")
             plt.colorbar(im, ax=ax)
-            #im.set_clim(self.win_min, self.win_max)
+            im.set_clim(self.min_length, self.max_length)
             plt.show()
+
+class fastDSTFTe(nn.Module):  # experiments
+    def __init__(self, x_sample,
+                    initial_win_length: float,   
+                    support: int,                
+                    stride: int, 
+                    window_function: str = 'beta',
+                    spline_density: int = 2,  # number of splines per stride, 2 is good
+                    spline_degree: int = 3,  # degree of the spline, 5 is good
+                    win_min = 100,
+                    win_max = 1000,
+                    sr: int = 16_000,
+                    ):
+        super().__init__()     
+        
+        # About x
+        self.x = x_sample
+        self.L = x_sample.shape[-1]
+        #self.B = x.shape[0]                                                                 # batch size  
+        self.sr = sr
+        self.eps = torch.finfo(x_sample.dtype).eps
+        self.device = x_sample.device
+        self.dtype = x_sample.dtype
+
+        # About the frames
+        self.stride = stride
+        self.N = support                                                                    # support size
+        self.T = int(1 + torch.div(self.L - self.N, stride, rounding_mode='floor'))    # time steps       
+        self.F = int(1 + self.N/2)                                                          # nb of frequencies
+        self.x_useful_length = (self.N-self.stride)+self.T*self.stride  # we might miss some points in the end
+        self.min_length = win_min
+        self.max_length = win_max
+        self.window_function = window_function
+        self.window_lengths = nn.Parameter(torch.full((self.F, self.T), initial_win_length, dtype=self.dtype, device=self.device), requires_grad=True)
+        
+        # Spline stuff
+        self.spline_degree = spline_degree
+        self.spline_density = spline_density
+        self.spline_stride = self.stride/self.spline_density
+        self.spline_support = int((self.spline_degree+1)*self.spline_stride)
+        self.n_splines = int(1 + (len(self.x[0])-self.spline_support) * self.spline_density / self.stride)
+        self.spline_stfts = torch.zeros((self.F, self.n_splines), dtype=torch.complex64)
+        self.spline_centers = (torch.arange(self.n_splines) * self.stride // self.spline_density) + (self.spline_support // 2)
+        self.splines_per_frame = int(1+self.spline_density*(self.N-self.spline_support)/self.stride)
+        self.frame2splines = torch.arange(0, self.splines_per_frame).reshape(-1, 1) + torch.arange(0, self.T*spline_density, spline_density)
+        # spline offsets in each frame
+        self.offsets = torch.arange(-self.N/2+self.spline_support/2, 
+                                    self.N/2-self.spline_support/2+self.spline_stride, 
+                                    self.spline_stride) 
+
+        # preallocation for speeed
+        self.expanded_spline_stfts = torch.zeros((self.F, self.splines_per_frame, self.T), dtype=torch.complex64)
+        #self.modulated_spline_stfts = torch.zeros((self.F, self.splines_per_frame, self.T), dtype=torch.complex64)
+        #self.coeffs = torch.zeros((self.F, self.splines_per_frame, self.T), dtype=torch.complex64)
+        #self.spectrogram = torch.zeros((self.F, self.T), dtype=torch.complex64)
+        #self.modulated_coeffs =  torch.zeros((self.F, self.splines_per_frame, self.T), dtype=torch.complex64)
+
+    # Computation of STFT with spline windows
+    def generate_spline(self):
+        # Generate a B-spline of given degree over a support
+        num_knots = self.spline_degree +2
+        spline_support = self.spline_support
+        knots = torch.linspace(0, spline_support, steps=num_knots)
+        knots = knots[1:-1]  # remove the endpoints
+        knots = torch.cat((
+            torch.full((self.spline_degree + 1,), 0.0),
+            knots,
+            torch.full((self.spline_degree + 1,), spline_support)
+        ))
+        num_basis = len(knots) - self.spline_degree  - 1
+        t = torch.linspace(0, spline_support, steps=spline_support)
+        coefs = torch.zeros(num_basis)
+        coefs[num_basis//2] = 1
+        bspline = BSpline(knots, coefs, self.spline_degree)(t)
+        return bspline
+    def compute_spline_stft(self):
+        # Generate spline window
+        spline_basis = torch.tensor(self.generate_spline(), dtype=torch.float32)  
+        # (spline_support,)
+        
+        # Compute start indices for all windows
+        start_positions = torch.arange(0, self.x_useful_length - self.spline_support + 1, self.spline_stride).round().long()  
+        # (T,)
+
+        # Extract sliding windows using unfold
+        # input: (B, x_length) → (B, n_splines, spline_support)
+        x_unfolded = torch.stack([self.x[:, start:start+self.spline_support] for start in start_positions], dim=1)
+
+        # Apply spline basis (broadcasting)
+        windowed_x = x_unfolded * spline_basis[None, None, :]
+        # (B, n_splines, spline_support)
+
+        # Zero-pad each frame to length N
+        pad_length = self.N - self.spline_support
+        windowed_x_padded = torch.nn.functional.pad(windowed_x, (0, pad_length)) 
+        # (B, n_splines, N)
+
+        # Compute FFT over last dimension
+        Zxx = torch.fft.fft(windowed_x_padded, dim=-1)  
+        # (B, n_splines, N)
+
+        # Keep only first F frequencies
+        self.spline_stfts = Zxx[:, :, :self.F].squeeze(0).T  
+        # (B, n_splines, F)
+
+        self.precomputed = True
+
+    # Warm start, not super reliable or well motivated right now
+    def enforce_ordering(self, value):  # helper function for warm start
+        stride = self.stride
+        margin = 0  # [0, stride)
+        for i in range(value.shape[0]):  # Iterate over rows
+            # too large from the left
+            last_left_edge = -torch.inf
+            for j in range(value.shape[1]):  # Go right over columns
+                if stride*j -value[i, j]/2 -margin < last_left_edge:
+                    value[i, j] = 2*(stride*j -last_left_edge -margin)
+                last_left_edge = stride*j -value[i, j]/2
+            # too large from the right
+            last_right_edge = torch.inf
+            for j in range(value.shape[1] - 1, -1, -1): # Go left over columns
+                if stride*j +value[i, j]/2 +margin > last_right_edge:
+                    value[i, j] = 2*(last_right_edge -margin -stride*j)
+                last_right_edge = stride*j +value[i, j]/2
+        return value
+    def warm_start(self):
+        with torch.no_grad():
+            self.window_lengths.data.fill_(self.min_length)
+        image = np.array(self().squeeze(0).detach())
+        kernel_size = (0, 0)
+        sigma = 2
+        smoothed_image = cv2.GaussianBlur(image, kernel_size, sigmaX=sigma, sigmaY=0)
+        left_right_derivative = np.diff(smoothed_image, axis=1, append=smoothed_image[:, -1:])
+        #left_right_2nd_derivative = np.abs(np.diff(left_right_derivative, axis=1, append=left_right_derivative[:, -1:]))
+        #derivsum = np.abs(left_right_derivative)+np.abs(left_right_2nd_derivative)
+        good_window_length = 1/(np.abs(left_right_derivative)+1e-7)
+        good_window_length = 200*good_window_length
+        good_window_length[good_window_length < 100] = 100
+        good_window_length[good_window_length > 1000] = 1000
+        sigma = 1
+        smoothed_window_length = cv2.GaussianBlur(good_window_length, kernel_size, sigma)
+        ordered_window_length = self.enforce_ordering(smoothed_window_length)
+        with torch.no_grad():
+            self.window_lengths.data.copy_(torch.tensor(ordered_window_length))
     
-    # small gains with these, not worth it against flexibility
-    """def prepare_for_beta_coefficients(self, offset):  # Normalized offsets for beta coefficients
-        normalized_offset = offset / self.N
-        x = 0.5+normalized_offset
-        self.x_1mx = x*(1-x).unsqueeze(0)"""
-    """def get_beta_coefficients(self, lambda_):
-        #x_1mx = self.x_1mx
-        normalized_offset = self.offsets / self.N
-        x = 0.5+normalized_offset
-        x_1mx = x*(1-x).unsqueeze(0)
-        a = 1/2* ( (3000/lambda_)**2 -1 ).unsqueeze(1)
-        if len(a.shape)==3:  # if a has all time steps, we need to add a dimension
-            x_1mx = x_1mx.unsqueeze(2)
+    # Spline coefficients for building larger windows
+    def coefficients(self, lambda_):  # get the spline coefficients
+        normalized_offsets = self.offsets / self.N
+        # (n_relevant_splines)
+
+        # The Greville abscissae are the centers of the splines! Kind of, boundary effect?
+        if self.window_function == 'beta':
+            a = 1/2* ( (3000/lambda_)**2 -1 ).unsqueeze(1)
+            # (n_frequencies, 1, T)  for normal forward
+
+            x = 0.5+normalized_offsets
+            x_1mx = x*(1-x).unsqueeze(0)
+            if len(a.shape)==3:  # if a has all time steps, we need to add a dimension
+                x_1mx = x_1mx.unsqueeze(2)
+            # (1, n_relevant_splines, 1)  for normal forward
+
+            # going through logs to avoid numerical issues
+            log_x_1mx = torch.log(x_1mx)
+            log_pdf_ish = (a - 1) * log_x_1mx
+            # (n_frequencies, n_relevant_splines, T)  for normal forward
+            log_pdf = log_pdf_ish -log_pdf_ish.logsumexp(dim=1, keepdim=True)
+            return torch.exp(log_pdf)
+        elif self.window_function == 'hann':
+            half_width = (lambda_/(2 * self.N)).unsqueeze(1)
+            # (n_frequencies, 1, T)  for normal forward
+
+            normalized_offsets = normalized_offsets.unsqueeze(0)
+            if len(half_width.shape)==3:  # if a has all time steps, we need to add a dimension
+                normalized_offsets = normalized_offsets.unsqueeze(2)
+            # (1, n_relevant_splines, 1)  for normal forward
+
+            # normalized offsets is already centered
+            out = 0.5 * (1 + torch.cos(torch.pi * normalized_offsets / half_width))
+            out[torch.abs(normalized_offsets) > half_width] = 0
+            out = out / out.sum(dim=1, keepdim=True)
+            #mask = torch.abs(normalized_offsets) <= half_width
+            #out = torch.zeros((self.F, self.splines_per_frame, self.T), dtype=torch.float32)
+            #double_normalized_offsets = normalized_offsets / half_width
+            #out[mask] = 0.5 * (1 + torch.cos(torch.pi * double_normalized_offsets[mask]))
+            #out = out / out.sum(dim=1, keepdim=True)
+            # (n_frequencies, n_relevant_splines, T)  for normal forward
+
+            return out
+        else:
+            raise NotImplementedError(f"Window function '{self.window_function}' not implemented.")
+
+    # Forward pass
+    def forward(self):
+        self.compute_spline_stft()  # compute the spline stft (20% of computation)
+        return (self.stft().abs() + self.eps).unsqueeze(0)  # calculate the stft by combining the splines
+    def stft(self):
+        # Build tensor of all splines with repetition (10% of computation)
+        self.expanded_spline_stfts = self.spline_stfts[:, self.frame2splines]  # so called "advanced" indexing
+        # (n_frequencies, n_relevant_splines, T)
+
+        # Modulate the spline stfts
+        self.expanded_spline_stfts.mul_(torch.exp(-1j * 2 * torch.pi * torch.arange(self.F).unsqueeze(1) / self.N * self.offsets.unsqueeze(0)).unsqueeze(2))
+        # (n_frequencies, n_relevant_splines, T)
+
+        # Get the spline coefficients from the window lengths (30% of computation)
+        coeffs = self.coefficients(self.window_lengths).to(torch.complex64)
+        # (n_frequencies, n_relevant_splines, T)
+
+        # Calculate the STFT (40% of computation)
+        return (self.expanded_spline_stfts * coeffs).sum(dim=1)
+        #self.spectrogram = torch.einsum('fst,fst->ft', self.expanded_spline_stfts, self.coeffs)
+
+    # Put window lengths back within the allowed range during optimization
+    def put_windows_back(self):
+        minimum = self.min_length
+        maximum = self.max_length
+        with torch.no_grad():
+            self.window_lengths.clamp_(min=minimum, max=maximum)
+
+    # Plot the spectrogram and window lengths
+    def plot(self, spec, weights: bool = True, title=""):
+        plt.figure(figsize=(6.4, 4.8))
+        plt.title("Spectrogram "+title)
+        ax = plt.subplot()
+        im = ax.imshow(spec[0].detach().cpu().log(), 
+            aspect="auto", 
+            origin="lower", 
+            cmap="jet",
+            interpolation='nearest',
+            )
+        plt.ylabel("frequencies")
+        plt.xlabel("frames")
+        plt.colorbar(im, ax=ax)
+        plt.show()
+
+        if weights is True:
+            plt.figure(figsize=(6.4, 4.8))
+            plt.title("Distribution of window lengths "+title)
+            ax = plt.subplot()
+            im = ax.imshow(
+                self.window_lengths.detach().cpu(),
+                aspect="auto",
+                origin="lower",
+                cmap="jet",
+                interpolation='nearest'
+            )
+            ax.set_ylabel("frequencies")
+            ax.set_xlabel("frames")
+            plt.colorbar(im, ax=ax)
+            im.set_clim(self.min_length, self.max_length)
+            plt.show()
+
+class fastDSTFTc(nn.Module):  # checkpoint
+    def __init__(self, x_sample,
+                    initial_win_length: float,   
+                    support: int,                
+                    stride: int, 
+                    window_function: str = 'beta',
+                    spline_density: int = 2,  # number of splines per stride, 2 is good
+                    spline_degree: int = 3,  # degree of the spline, 5 is good
+                    win_min = 100,
+                    win_max = 1000,
+                    sr: int = 16_000,
+                    ):
+        super().__init__()     
+        # About x
+        self.x = x_sample
+        self.L = x_sample.shape[-1]
+        #self.B = x.shape[0]                                                                 # batch size  
+        self.sr = sr
+        self.eps = torch.finfo(x_sample.dtype).eps
+        self.device = x_sample.device
+        self.dtype = x_sample.dtype
+
+        # About the frames
+        self.stride = stride
+        self.N = support                                                                    # support size
+        self.T = int(1 + torch.div(self.L - self.N, stride, rounding_mode='floor'))    # time steps       
+        self.F = int(1 + self.N/2)                                                          # nb of frequencies
+        self.x_useful_length = (self.N-self.stride)+self.T*self.stride  # we might miss some points in the end
+        self.min_length = win_min
+        self.max_length = win_max
+        self.window_function = window_function
+        self.window_lengths = nn.Parameter(torch.full((self.F, self.T), initial_win_length, dtype=self.dtype, device=self.device), requires_grad=True)
+        
+        # Spline stuff
+        self.spline_degree = spline_degree
+        self.spline_density = spline_density
+        self.spline_stride = self.stride/self.spline_density
+        self.spline_support = int((self.spline_degree+1)*self.spline_stride)
+        self.n_splines = int(1 + (len(self.x[0])-self.spline_support) * self.spline_density / self.stride)
+        self.spline_stfts = torch.zeros((self.F, self.n_splines), dtype=torch.complex64)
+        self.spline_centers = (torch.arange(self.n_splines) * self.stride // self.spline_density) + (self.spline_support // 2)
+        self.splines_per_frame = int(1+self.spline_density*(self.N-self.spline_support)/self.stride)
+        self.frame2splines = torch.arange(0, self.splines_per_frame).reshape(-1, 1) + torch.arange(0, self.T*spline_density, spline_density)
+        # spline offsets in each frame
+        self.offsets = torch.arange(-self.N/2+self.spline_support/2, 
+                                    self.N/2-self.spline_support/2+self.spline_stride, 
+                                    self.spline_stride) 
+
+    # Computation of STFT with spline windows
+    def generate_spline(self):
+        # Generate a B-spline of given degree over a support
+        num_knots = self.spline_degree +2
+        spline_support = self.spline_support
+        knots = torch.linspace(0, spline_support, steps=num_knots)
+        knots = knots[1:-1]  # remove the endpoints
+        knots = torch.cat((
+            torch.full((self.spline_degree + 1,), 0.0),
+            knots,
+            torch.full((self.spline_degree + 1,), spline_support)
+        ))
+        num_basis = len(knots) - self.spline_degree  - 1
+        t = torch.linspace(0, spline_support, steps=spline_support)
+        coefs = torch.zeros(num_basis)
+        coefs[num_basis//2] = 1
+        bspline = BSpline(knots, coefs, self.spline_degree)(t)
+        return bspline
+    def compute_spline_stft(self):
+        # Generate spline window
+        spline_basis = torch.tensor(self.generate_spline(), dtype=torch.float32)  
+        # (spline_support,)
+        
+        # Compute start indices for all windows
+        start_positions = torch.arange(0, self.x_useful_length - self.spline_support + 1, self.spline_stride).round().long()  
+        # (T,)
+
+        # Extract sliding windows using unfold
+        # input: (B, x_length) → (B, n_splines, spline_support)
+        x_unfolded = torch.stack([self.x[:, start:start+self.spline_support] for start in start_positions], dim=1)
+
+        # Apply spline basis (broadcasting)
+        windowed_x = x_unfolded * spline_basis[None, None, :]
+        # (B, n_splines, spline_support)
+
+        # Zero-pad each frame to length N
+        pad_length = self.N - self.spline_support
+        windowed_x_padded = torch.nn.functional.pad(windowed_x, (0, pad_length)) 
+        # (B, n_splines, N)
+
+        # Compute FFT over last dimension
+        Zxx = torch.fft.fft(windowed_x_padded, dim=-1)  
+        # (B, n_splines, N)
+
+        # Keep only first F frequencies
+        self.spline_stfts = Zxx[:, :, :self.F].squeeze(0).T  
+        # (B, n_splines, F)
+
+        self.precomputed = True
+
+    # Warm start, not super reliable or well motivated right now
+    def enforce_ordering(self, value):  # helper function for warm start
+        stride = self.stride
+        margin = 0  # [0, stride)
+        for i in range(value.shape[0]):  # Iterate over rows
+            # too large from the left
+            last_left_edge = -torch.inf
+            for j in range(value.shape[1]):  # Go right over columns
+                if stride*j -value[i, j]/2 -margin < last_left_edge:
+                    value[i, j] = 2*(stride*j -last_left_edge -margin)
+                last_left_edge = stride*j -value[i, j]/2
+            # too large from the right
+            last_right_edge = torch.inf
+            for j in range(value.shape[1] - 1, -1, -1): # Go left over columns
+                if stride*j +value[i, j]/2 +margin > last_right_edge:
+                    value[i, j] = 2*(last_right_edge -margin -stride*j)
+                last_right_edge = stride*j +value[i, j]/2
+        return value
+    def warm_start(self):
+        with torch.no_grad():
+            self.window_lengths.data.fill_(self.min_length)
+        image = np.array(self().squeeze(0).detach())
+        kernel_size = (0, 0)
+        sigma = 2
+        smoothed_image = cv2.GaussianBlur(image, kernel_size, sigmaX=sigma, sigmaY=0)
+        left_right_derivative = np.diff(smoothed_image, axis=1, append=smoothed_image[:, -1:])
+        #left_right_2nd_derivative = np.abs(np.diff(left_right_derivative, axis=1, append=left_right_derivative[:, -1:]))
+        #derivsum = np.abs(left_right_derivative)+np.abs(left_right_2nd_derivative)
+        good_window_length = 1/(np.abs(left_right_derivative)+1e-7)
+        good_window_length = 200*good_window_length
+        good_window_length[good_window_length < 100] = 100
+        good_window_length[good_window_length > 1000] = 1000
+        sigma = 1
+        smoothed_window_length = cv2.GaussianBlur(good_window_length, kernel_size, sigma)
+        ordered_window_length = self.enforce_ordering(smoothed_window_length)
+        with torch.no_grad():
+            self.window_lengths.data.copy_(torch.tensor(ordered_window_length))
     
-        # going through logs to avoid numerical issues
-        log_x_1mx = torch.log(x_1mx)
-        log_pdf_ish = (a - 1) * log_x_1mx
-        log_pdf = log_pdf_ish -log_pdf_ish.logsumexp(dim=1, keepdim=True)
-        pdf = torch.exp(log_pdf)
-        return pdf"""
+    # Spline coefficients for building larger windows
+    def coefficients(self, lambda_):  # get the spline coefficients
+        normalized_offsets = self.offsets / self.N
+        # (n_relevant_splines)
+
+        # The Greville abscissae are the centers of the splines! Kind of, boundary effect?
+        if self.window_function == 'beta':
+            a = 1/2* ( (3000/lambda_)**2 -1 ).unsqueeze(1)
+
+            x = 0.5+normalized_offsets
+            x_1mx = x*(1-x).unsqueeze(0)
+            if len(a.shape)==3:  # if a has all time steps, we need to add a dimension
+                x_1mx = x_1mx.unsqueeze(2)
+        
+            # going through logs to avoid numerical issues
+            log_x_1mx = torch.log(x_1mx)
+            log_pdf_ish = (a - 1) * log_x_1mx
+            log_pdf = log_pdf_ish -log_pdf_ish.logsumexp(dim=1, keepdim=True)
+            pdf = torch.exp(log_pdf)
+            return pdf
+        elif self.window_function == 'hann':
+            half_width = (lambda_/(2 * self.N)).unsqueeze(1)
+            # (n_frequencies, 1, T)  for normal forward
+
+            normalized_offsets = normalized_offsets.unsqueeze(0)
+            if len(half_width.shape)==3:  # if a has all time steps, we need to add a dimension
+                normalized_offsets = normalized_offsets.unsqueeze(2)
+            # (1, n_relevant_splines, 1)  for normal forward
+
+            # normalized offsets is already centered
+            out = 0.5 * (1 + torch.cos(torch.pi * normalized_offsets / half_width))
+            out[torch.abs(normalized_offsets) > half_width] = 0
+            out = out / out.sum(dim=1, keepdim=True)
+            #mask = torch.abs(normalized_offsets) <= half_width
+            #out = torch.zeros((self.F, self.splines_per_frame, self.T), dtype=torch.float32)
+            #double_normalized_offsets = normalized_offsets / half_width
+            #out[mask] = 0.5 * (1 + torch.cos(torch.pi * double_normalized_offsets[mask]))
+            #out = out / out.sum(dim=1, keepdim=True)
+            # (n_frequencies, n_relevant_splines, T)  for normal forward
+
+            return out
+        else:
+            raise NotImplementedError(f"Window function '{self.window_function}' not implemented.")
+
+    # Forward pass
+    def forward(self):
+        self.compute_spline_stft()  # compute the spline stft (20% of computation)
+        return (self.stft().abs() + self.eps).unsqueeze(0)  # compute the spectrogram by combining the splines
+    def stft(self):
+        # Build tensor of all splines with repetition (10% of computation)
+        expanded_spline_stfts = self.spline_stfts[:, self.frame2splines]  # "advanced" indexing
+        # (n_frequencies, n_relevant_splines, T)
+
+        # Get the modulation factors (1% of computation)
+        modulation_factors = torch.exp(-1j * 2 * torch.pi * torch.arange(self.F).unsqueeze(1) / self.N * self.offsets.unsqueeze(0)).unsqueeze(2)
+        # (n_frequencies, n_relevant_splines, 1)
+
+        # Get the spline coefficients fr0m the window lengths (30% of computation)
+        coeffs = self.coefficients(self.window_lengths)
+        # (n_frequencies, n_relevant_splines, T)
+
+        # Calculate the STFT (40% of computation)
+        spectrogram = (expanded_spline_stfts * modulation_factors * coeffs.to(torch.complex64)).sum(dim=1)
+        #spectrogram = torch.einsum('fst,fs,fst->ft', expanded_spline_stfts, modulation_factors, coeffs.to(torch.complex64))
+        return spectrogram
+
+    # Put window lengths back within the allowed range during optimization
+    def put_windows_back(self):
+        minimum = self.min_length
+        maximum = self.max_length
+        with torch.no_grad():
+            self.window_lengths.clamp_(min=minimum, max=maximum)
+
+    # Plot the spectrogram and window lengths
+    def plot(self, spec, weights: bool = True, title=""):
+        plt.figure(figsize=(6.4, 4.8))
+        plt.title("Spectrogram "+title)
+        ax = plt.subplot()
+        im = ax.imshow(spec[0].detach().cpu().log(), 
+            aspect="auto", 
+            origin="lower", 
+            cmap="jet",
+            interpolation='nearest',
+            )
+        plt.ylabel("frequencies")
+        plt.xlabel("frames")
+        plt.colorbar(im, ax=ax)
+        plt.show()
+
+        if weights is True:
+            plt.figure(figsize=(6.4, 4.8))
+            plt.title("Distribution of window lengths "+title)
+            ax = plt.subplot()
+            im = ax.imshow(
+                self.window_lengths.detach().cpu(),
+                aspect="auto",
+                origin="lower",
+                cmap="jet",
+                interpolation='nearest'
+            )
+            ax.set_ylabel("frequencies")
+            ax.set_xlabel("frames")
+            plt.colorbar(im, ax=ax)
+            im.set_clim(self.min_length, self.max_length)
+            plt.show()
 
 class DSTFTdev(nn.Module):
     def __init__(self, x,

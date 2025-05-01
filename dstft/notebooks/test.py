@@ -1,29 +1,17 @@
-import torch
-import time
+import torch 
 
-# Example: 50000 parameters (say 500 x 100 matrix)
-input_size = 50000
-output_size = 1
-
-model = torch.nn.Linear(input_size, output_size)
-input_data = torch.randn(1, input_size)  # batch size 1
-
-# Warm-up (to avoid first-run overhead)
-output = model(input_data)
-loss = output.sum()
-loss.backward()
-model.zero_grad()
-
-# Time measurement
-start = time.time()
-
-for epoch in range(1_000):
-    output = model(input_data)
-    loss = output.sum()
-    loss.backward()
-    model.zero_grad()
-
-#torch.cuda.synchronize() if torch.cuda.is_available() else None
-end = time.time()
-
-print(f"Forward + backward pass time: {(end - start)/epoch:.5f} seconds")
+def generate_bspline(self):
+    c = self.spline_stride
+    bspline = torch.ones((c))
+    length = c
+    p = 0
+    while p < self.spline_degree:
+        p += 1
+        length += c
+        first = torch.zeros((length))
+        first[:-c] = bspline
+        second = torch.zeros((length))
+        second[c:] = bspline
+        bspline = 1/(p*c) * ( torch.arange(length)*first + 
+                                   ((p+1)*c -torch.arange(length))*second )
+    return bspline
