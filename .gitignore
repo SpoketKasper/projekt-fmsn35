@@ -3,3 +3,5 @@ venv/
 
 ##Audio
 .wav
+
+differentiable-mel-spectrogram/ray_results/
