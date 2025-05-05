@@ -84,7 +84,14 @@ class fastDSTFT(nn.Module):
         self.padding = padding
         self.spline_degree = spline_degree
         self.spline_density = spline_density
-
+        if self.stride/self.spline_density % 1 != 0:
+            raise ValueError("spline_density must divide the stride")  # tillfällig förenkling
+        else:
+            self.spline_stride = int(self.stride/self.spline_density)
+        self.spline_support = int((self.spline_degree+1)*self.spline_stride)
+        if (1+(self.N-self.spline_support)/self.spline_stride) % 2 != 1:
+            raise ValueError("an odd number of splines must fit perfectly into the support (as of now)")
+        self.bspline_window = self.generate_bspline().to(self.device)  # generating the B-spline window
     def lazy_initialization(self, x_sample):  # initializations that depend on x
         if x_sample.device.type != self.device.type:
             raise ValueError("x is on the wrong device")
@@ -97,24 +104,22 @@ class fastDSTFT(nn.Module):
         self.eps = torch.finfo(self.dtype).eps
 
         # Initialization
-
+        # For computing spline stft
         if self.padding=="valid":
             self.T = int(1 + torch.div(self.L - self.N, self.stride, rounding_mode='floor'))    # time steps
-            self.x_useful_length = (self.N-self.stride)+self.T*self.stride  # we might miss some points in the end 
+            self.L_useful = (self.N-self.stride)+self.T*self.stride  # we might miss some points in the end
+            self.S = int(1+(self.L_useful-self.spline_support)/self.spline_stride)
+            self.spline_window_starts = self.spline_stride*torch.arange(0, self.S, device=self.device)  # spline offsets from the signal start
         elif self.padding=="same":
             self.T = 1 + int(torch.div(self.L, self.stride, rounding_mode="floor"))
-            self.x_useful_length = self.L
+            self.L_useful = self.spline_stride*int(torch.div(self.L, self.spline_stride, rounding_mode="floor"))
+            self.extraS = int((self.N/2)/self.spline_stride)  # the number of extra splines on each side
         else:
             raise ValueError("the padding mode is not known")
-        
-        # For computing spline stft
-        self.spline_stride = self.stride/self.spline_density
-        self.spline_support = int((self.spline_degree+1)*self.spline_stride)
-        self.S = int(1 + (self.L-self.spline_support) * self.spline_density / self.stride)  # total number of splines
-        # spline offsets from the signal start
-        self.spline_window_starts = torch.arange(0, self.x_useful_length -self.spline_support +1, self.spline_stride, device=self.device).round().long() 
+        self.S = int(1+(self.L_useful-self.spline_support)/self.spline_stride)
+        self.spline_window_starts = self.spline_stride*torch.arange(0, self.S, device=self.device)  # spline offsets from the signal start
+        #raise ValueError("F")
         self.fold_idcs = self.spline_window_starts.unsqueeze(0) + torch.arange(self.spline_support, device=self.device).unsqueeze(1)
-        self.bspline_window = self.generate_bspline().to(self.device)  # generating the B-spline window
         self.pad_buffer = torch.zeros((self.B, self.N, self.S), device=self.device)
         #self.frame2splines = torch.arange(0, self.s, device=self.device).reshape(-1, 1) + torch.arange(0, self.T*self.spline_density, self.spline_density, device=self.device)
         self.modulation_factors = torch.exp(-1j * 2 * torch.pi * torch.arange(self.F, device=self.device).unsqueeze(1) / self.N * self.spline_window_starts.unsqueeze(0))
@@ -126,6 +131,7 @@ class fastDSTFT(nn.Module):
         offsets = torch.arange(-self.N/2+self.spline_support/2,  # positions of splines in a window relative to the middle
                             self.N/2-self.spline_support/2+self.spline_stride, 
                             self.spline_stride, device=self.device) 
+        print(offsets)
         self.normalized_offsets = offsets / self.N  # offsets normalized to [-0.5, 0.5], used for Hann windows
         # (S)
         x = 0.5+self.normalized_offsets
@@ -234,7 +240,7 @@ class fastDSTFT(nn.Module):
     def forward(self, x):  # B=64: gpu->cpu takes 0.0037, cpu->gpu takes 0.0050
         if not self.fully_initialized:  # do the x-contextual initialization
             self.lazy_initialization(x)
-        # compute the stft by combining the splines
+        # compute the stft by stfting and then combining the splines
         stft = self.stft(x)
         return stft.abs() + self.eps  # compute the spectrogram 
     def compute_spline_stft(self, x):  # timing at B=64
