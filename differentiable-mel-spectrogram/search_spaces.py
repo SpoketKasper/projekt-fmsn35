@@ -89,7 +89,7 @@ def time_frequency(max_epochs):
         # training
         'optimizer_name' : 'sgd',
         'lr_model'       : 1e-3, 
-        'lr_tf'          : 10,
+        'lr_tf'          : 100,
         'batch_size'     : 16,
         #'trainable'      : tune.grid_search([True, False]),
         'trainable'      : True,
