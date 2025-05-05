@@ -61,7 +61,7 @@ class fastDSTFT(nn.Module):
                     win_min = 100,
                     win_max = 1000,
                     sr: int = 16_000,
-                    padding: str = "valid"
+                    padding: str = "same"
                     ):
         super().__init__() 
         # Full initialization happens when the first batch of x is passed
@@ -127,20 +127,6 @@ class fastDSTFT(nn.Module):
         # For expanding the spline stft
         self.s = int(1+self.spline_density*(self.N-self.spline_support)/self.stride)  # splines per frame
         
-        # For getting the coefficients
-        offsets = torch.arange(-self.N/2+self.spline_support/2,  # positions of splines in a window relative to the middle
-                            self.N/2-self.spline_support/2+self.spline_stride, 
-                            self.spline_stride, device=self.device) 
-        print(offsets)
-        self.normalized_offsets = offsets / self.N  # offsets normalized to [-0.5, 0.5], used for Hann windows
-        # (S)
-        x = 0.5+self.normalized_offsets
-        x_1mx = (x*(1-x)).unsqueeze(0).unsqueeze(2)
-        # (1, s, 1)
-        # going through logs to avoid numerical issues
-        self.log_x_1mx = torch.log(x_1mx)
-        # (1, s, 1)
-
         # The PARAMETER
         self.window_lengths = nn.Parameter(torch.full((self.F, self.T), self.initial_win_length, dtype=self.dtype, device=self.device), requires_grad=True)
 
@@ -199,16 +185,37 @@ class fastDSTFT(nn.Module):
     # Spline coefficients for building larger windows
     @torch.compile  # speeds up this function by a lot
     def coefficients(self, lambda_):  # get the spline coefficients
+        print("go")
+        tic()
         # The Greville abscissae are the centers of the splines!
+        offsets = torch.arange(-self.N/2+self.spline_support/2,  # positions of splines in a window relative to the middle
+                            self.N/2-self.spline_support/2+self.spline_stride, 
+                            self.spline_stride, device=self.device) 
+        normalized_offsets = offsets / self.N  # offsets normalized to [-0.5, 0.5], used for Hann windows
+
         if self.window_function == 'beta':
+            # (S)
+            x = 0.5+normalized_offsets
+            x_1mx = (x*(1-x)).unsqueeze(0).unsqueeze(2)
+            # (1, s, 1)
+            # going through logs to avoid numerical issues
+            log_x_1mx = torch.log(x_1mx)
+            # (1, s, 1). until here is <1% of this function on cpu
+            toc()
+
             # Calculate the a=b parameter of the Beta distribution (4% of this function on CPU)
             a = 1/2*((3*self.N/lambda_)**2 -1).unsqueeze(1)
-            # (F, T)
+            print(a.shape)
+            # (F, 1, T)
 
-            # Raise the base to the exponent a (13% of this function on CPU)
-            log_pdf_ish = (a - 1) * self.log_x_1mx
-            
-            # Normalize the coefficients to 1 (57% of this function on CPU) and exponentiate back (26% of this function on CPU)
+            # Raise the base to the exponent a (17% of this function on CPU)
+            log_pdf_ish = (a - 1) * log_x_1mx
+            print(log_pdf_ish.shape)
+            # (F, s, T)
+
+            # (new) if some splines are outside of the 
+
+            # Normalize the coefficients to 1 (55% of this function on CPU) and exponentiate back (24% of this function on CPU)
             return torch.exp(log_pdf_ish -log_pdf_ish.logsumexp(dim=1, keepdim=True))  # F.softmax(log_pdf_ish, dim=1)
         elif self.window_function == 'hann':
             half_width = (lambda_/(2 * self.N)).unsqueeze(1)
@@ -261,8 +268,14 @@ class fastDSTFT(nn.Module):
         # (B, F, S)
 
         # Modulate the FFTs to compensate for their temporal position (6%=0.002, 14%=0.003 of computation using CPU, GPU)
-        return spline_stft.mul_(self.modulation_factors)
+        spline_stft.mul_(self.modulation_factors)
         # (B, F, S)
+
+        if self.padding == "same":  # we need to add some fake zeros on each end
+            return F.pad(spline_stft, pad=(self.extraS, self.extraS), mode='constant', value=0)
+            # (B, F, extraS+S+extraS)
+        else:
+            return spline_stft
     def stft(self, x):  # timing at B=64
         # Compute preliminary STFT with spline windows (63%, 33% of computation using CPU, GPU)
         spline_stfts = self.compute_spline_stft(x)
