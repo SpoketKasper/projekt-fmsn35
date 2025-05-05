@@ -251,23 +251,14 @@ class LinearAdaptiveNet(nn.Module):
             normalize_window=normalize_window
         )
         self.device = device
+        self.size = size
         self.n_classes = n_classes
-        self.fc = None
-        self.target_size = None
-        self.is_first_forward = True
+        self.fc = nn.Linear(size[0] * size[1], n_classes)
         
     def forward(self, x):
         s = self.spectrogram_layer(x)
-        
-        if self.is_first_forward:
-            self.target_size = (s.size(2), s.size(3))
-            input_size = s.size(2) * s.size(3)
-            self.fc = nn.Linear(input_size, self.n_classes).to(self.device)
-            self.is_first_forward = False
-        elif (s.size(2), s.size(3)) != self.target_size:
-            s = F.interpolate(s, size=self.target_size, mode='bilinear', align_corners=False)
-            
-        x = s.view(s.size(0), -1)
+        s = F.interpolate(s, size=self.size, mode='bilinear', align_corners=False)
+        x = s.view(-1, self.size[0] * self.size[1])
         x = self.fc(x)
         
         return x, s
