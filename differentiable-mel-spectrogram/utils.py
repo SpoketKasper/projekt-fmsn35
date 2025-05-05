@@ -161,6 +161,15 @@ def get_model_by_config(config):
             optimized  = config['optimized'],
             normalize_window = config['normalize_window'],
         )
+    elif config['model_name'] == 'linear_adaptive_net':
+        net = models.LinearAdaptiveNet(
+            n_classes  = n_classes,
+            init_lambd = torch.tensor(config['init_lambd']),
+            device     = config['device'],
+            size       = (config['n_points']+1, config['n_points']+1),
+            hop_length = config['hop_length'],
+            normalize_window = config['normalize_window'],
+        )
     elif config['model_name'] == 'bn_linear_net':
         net = models.BatchNormLinearNet(
             n_classes  = n_classes,

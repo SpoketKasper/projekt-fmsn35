@@ -24,13 +24,26 @@ def dastft_stride_transform(s_in, stride_min, stride_max, dtype, device):
 
 def dastft_window_function(direction, idx_frac, N, F, T, actual_win_length, dtype, device):
     base = torch.arange(
-        0, N, 1, dtype=dtype, device=device,
+        0, N, 1, dtype=dtype, device=device
     )[:, None, None].expand([-1, F, T])
+    
     base = base - idx_frac
+    
+    if actual_win_length.shape[-1] != T:
+        if actual_win_length.shape[-1] == 1:
+            actual_win_length = actual_win_length.expand(-1, T)
+        else:
+            actual_win_length = torch.nn.functional.interpolate(
+                actual_win_length.unsqueeze(0),
+                size=T,
+                mode='nearest'
+            ).squeeze(0)
+    
+    actual_win_length = actual_win_length.view(1, 1, T)
     
     mask1 = base.ge(torch.ceil((N - 1 + actual_win_length) / 2))
     mask2 = base.le(torch.floor((N - 1 - actual_win_length) / 2))
-    
+
     if direction == "forward":
         tap_win = 0.5 - 0.5 * torch.cos(
             2

@@ -201,10 +201,11 @@ class SpectrogramLayer(nn.Module):
         return spectrograms
 
 class DASTFTSpectrogramLayer(nn.Module):
-    def __init__(self, init_win_length, device='cpu', hop_length=128, normalize_window=False):
+    def __init__(self, init_lambd, device='cpu', hop_length=1, normalize_window=False):
         super(DASTFTSpectrogramLayer, self).__init__()
         self.hop_length = hop_length
-        self.win_length = nn.Parameter(init_win_length)
+
+        self.lambd = nn.Parameter(init_lambd, requires_grad=True)
         self.device = device
         self.normalize_window = normalize_window
         
@@ -213,7 +214,7 @@ class DASTFTSpectrogramLayer(nn.Module):
     def forward(self, x):
         (batch_size, n_points) = x.shape
         
-        support = torch.max(self.win_length).item() * 2
+        support = torch.max(self.lambd).item() * 2
         F = int(1 + support / 2)
         T = int(1 + (n_points - (support - 1) - 1) // self.hop_length)
         
@@ -227,7 +228,7 @@ class DASTFTSpectrogramLayer(nn.Module):
             
             spec, _ = atf.dastft_compute(
                 x=signal.unsqueeze(0),
-                win_length_param=self.win_length,
+                win_length_param=self.lambd,
                 strides_param=self.stride_param,
                 N=int(support),
                 F=F,
@@ -238,24 +239,37 @@ class DASTFTSpectrogramLayer(nn.Module):
             spectrograms[idx, :, :, :] = spec.unsqueeze(0)
             
         return spectrograms
-
-class MlpNet(nn.Module):
-    def __init__(self, n_classes, init_lambd, device, optimized=False, size=(512, 1024), hop_length=1, normalize_window=False):
-        super(MlpNet, self).__init__()
-        self.spectrogram_layer = SpectrogramLayer(init_lambd, device=device, optimized=optimized, size=size, hop_length=hop_length, normalize_window=normalize_window)
+    
+class LinearAdaptiveNet(nn.Module):
+    def __init__(self, n_classes, init_lambd, device='cpu', size=(512, 1024), 
+                 hop_length=1, normalize_window=False):
+        super(LinearAdaptiveNet, self).__init__()
+        self.spectrogram_layer = DASTFTSpectrogramLayer(
+            init_lambd=init_lambd,
+            device=device,
+            hop_length=hop_length,
+            normalize_window=normalize_window
+        )
         self.device = device
-        self.size = size
+        self.n_classes = n_classes
+        self.fc = None
+        self.target_size = None
+        self.is_first_forward = True
         
-        self.fc1 = nn.Linear(size[0] * size[1], 128)
-        self.fc2 = nn.Linear(128, n_classes)
-
     def forward(self, x):
-        # compute spectrograms
         s = self.spectrogram_layer(x)
-        x = self.fc1(s.view(-1, self.size[0] * self.size[1]))
-        x = F.relu(x)
-        #x = F.dropout(x, p=0.2)
-        x = self.fc2(x)
+        
+        if self.is_first_forward:
+            self.target_size = (s.size(2), s.size(3))
+            input_size = s.size(2) * s.size(3)
+            self.fc = nn.Linear(input_size, self.n_classes).to(self.device)
+            self.is_first_forward = False
+        elif (s.size(2), s.size(3)) != self.target_size:
+            s = F.interpolate(s, size=self.target_size, mode='bilinear', align_corners=False)
+            
+        x = s.view(s.size(0), -1)
+        x = self.fc(x)
+        
         return x, s
 
 class LinearNet(nn.Module):
@@ -274,6 +288,25 @@ class LinearNet(nn.Module):
         #x = F.dropout(s.view(-1, self.size[0] * self.size[1]), p=0.2)
         x = s.view(-1, self.size[0] * self.size[1])
         x = self.fc(x)
+        return x, s
+
+class MlpNet(nn.Module):
+    def __init__(self, n_classes, init_lambd, device, optimized=False, size=(512, 1024), hop_length=1, normalize_window=False):
+        super(MlpNet, self).__init__()
+        self.spectrogram_layer = SpectrogramLayer(init_lambd, device=device, optimized=optimized, size=size, hop_length=hop_length, normalize_window=normalize_window)
+        self.device = device
+        self.size = size
+        
+        self.fc1 = nn.Linear(size[0] * size[1], 128)
+        self.fc2 = nn.Linear(128, n_classes)
+
+    def forward(self, x):
+        # compute spectrograms
+        s = self.spectrogram_layer(x)
+        x = self.fc1(s.view(-1, self.size[0] * self.size[1]))
+        x = F.relu(x)
+        #x = F.dropout(x, p=0.2)
+        x = self.fc2(x)
         return x, s
 
 class BatchNormLinearNet(nn.Module):

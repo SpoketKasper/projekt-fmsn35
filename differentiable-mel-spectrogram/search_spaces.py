@@ -1,5 +1,6 @@
 from ray import tune
 from utils import get_best_device
+import torch
 
 def esc50(max_epochs):
     resample_rate = 8000
@@ -71,9 +72,16 @@ def audio_mnist(max_epochs):
 def time_frequency(max_epochs):
     sigma_ref = 6.38
 
+    support = 10
+    T = int(1 + (128 - (support - 1) - 1) // 8)
+    init_win_length1 = torch.full((1, T), support/2)
+    support = 16
+    T = int(1 + (128 - (support - 1) - 1) // 8)
+    init_win_length2 = torch.full((1, T), support/2)
+
     search_space = {
         # model
-        'model_name' : 'linear_net',
+        'model_name' : 'linear_adaptive_net',
         'hop_length' : 1,
         'optimized'  : False,
         'normalize_window' : False,
@@ -81,9 +89,10 @@ def time_frequency(max_epochs):
         # training
         'optimizer_name' : 'sgd',
         'lr_model'       : 1e-3, 
-        'lr_tf'          : 1,
-        'batch_size'     : 128,
-        'trainable'      : tune.grid_search([True, False]),
+        'lr_tf'          : 10,
+        'batch_size'     : 16,
+        #'trainable'      : tune.grid_search([True, False]),
+        'trainable'      : True,
         'max_epochs'     : max_epochs,
         'patience'       : 100,
         'device'         : get_best_device(),
@@ -91,11 +100,12 @@ def time_frequency(max_epochs):
         # dataset
         'n_points'      : 128,
         'noise_std'     : 0.5,
-        'init_lambd'    : tune.grid_search([x * sigma_ref for x in [0.2, 1.0, 5.0]]),
-        'n_samples'     : 5000, 
+        'init_lambd'    : tune.grid_search([init_win_length1, init_win_length2]),
+        'n_samples'     : 512, 
         'sigma_ref'     : sigma_ref,
         'dataset_name'  : 'time_frequency', 
         'center_offset' : False, 
     }
+
 
     return search_space

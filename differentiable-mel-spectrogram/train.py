@@ -12,7 +12,7 @@ def train_model(net, optimizer, loss_fn, trainloader, validloader, scheduler, pa
     history = {
         "best_valid_acc" : 0,
         "best_valid_loss" : np.inf,
-        "init_lambd" : net.spectrogram_layer.lambd.item(),
+        "init_lambd" : tensor_format(net.spectrogram_layer.lambd),
         "converged" : False,
     }
     best_valid_acc = 0
@@ -55,7 +55,7 @@ def train_model(net, optimizer, loss_fn, trainloader, validloader, scheduler, pa
                 if i % 10 == 0:
                     print("max values: ", torch.max(logits, dim=1).values.cpu().detach().numpy())
                     print("batch loss = {}".format(loss.item()))
-                    print("est. lambd = ", net.spectrogram_layer.lambd.item())
+                    print("est. lambd = ", lambda_ = tensor_format(net.spectrogram_layer.lambd))
 
             running_loss += loss.item()
             running_energy += np.sum(s.cpu().detach().numpy())
@@ -72,7 +72,7 @@ def train_model(net, optimizer, loss_fn, trainloader, validloader, scheduler, pa
 
         if verbose >= 1:
             print("epoch {}, train loss = {}".format(epoch, running_loss / count))
-            print("est. lambd = ", net.spectrogram_layer.lambd.item())
+            print("est. lambd = ", lambda_ = tensor_format(net.spectrogram_layer.lambd))
 
         running_loss = 0.0
         count = 0
@@ -123,7 +123,7 @@ def train_model(net, optimizer, loss_fn, trainloader, validloader, scheduler, pa
 
             best_valid_acc = valid_acc
             best_valid_loss = valid_loss
-            best_lambd_est = net.spectrogram_layer.lambd.item()
+            best_lambd_est = lambda_ = tensor_format(net.spectrogram_layer.lambd)
             patience_count = 0
             if verbose >= 1:
                 print("new best valid acc  = {}, patience_count = {}".format(best_valid_acc, patience_count))
@@ -131,7 +131,7 @@ def train_model(net, optimizer, loss_fn, trainloader, validloader, scheduler, pa
             patience_count += 1
 
         # report results
-        report({"loss": train_loss, "lambd_est": net.spectrogram_layer.lambd.item(), "valid_loss": valid_loss, "valid_acc": valid_acc, "best_valid_acc": best_valid_acc, "best_valid_loss": best_valid_loss, "energy": train_energy, "best_lambd_est": best_lambd_est})
+        report({"loss": train_loss, "lambd_est": tensor_format(net.spectrogram_layer.lambd), "valid_loss": valid_loss, "valid_acc": valid_acc, "best_valid_acc": best_valid_acc, "best_valid_loss": best_valid_loss, "energy": train_energy, "best_lambd_est": best_lambd_est})
 
         if verbose >= 1:
             print("epoch {}, valid loss = {}".format(epoch, valid_loss))
@@ -154,6 +154,9 @@ def train_model(net, optimizer, loss_fn, trainloader, validloader, scheduler, pa
     # save history
     history["best_valid_acc"] = best_valid_acc
     history["best_valid_loss"] = best_valid_loss
-    history["est_lambd"] = net.spectrogram_layer.lambd.item()
+    history["est_lambd"] = tensor_format(net.spectrogram_layer.lambd)
     
     return net, history
+
+def tensor_format(tensor):
+   return tensor.tolist() if tensor.numel() > 1 else tensor.item()
