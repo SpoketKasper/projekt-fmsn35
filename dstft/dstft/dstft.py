@@ -61,7 +61,7 @@ class fastDSTFT(nn.Module):
                     win_min = 100,
                     win_max = 1000,
                     sr: int = 16_000,
-                    padding: str = "same"
+                    padding: str = "same",  # "valid", "same-rolloff", "same"
                     ):
         super().__init__() 
         # Full initialization happens when the first batch of x is passed
@@ -103,30 +103,55 @@ class fastDSTFT(nn.Module):
         self.dtype = x_sample.dtype                                                               # batch size  
         self.eps = torch.finfo(self.dtype).eps
 
-        # Initialization
-        # For computing spline stft
+        # For expanding the spline stft (step 2)
+        self.s = int(1+(self.N-self.spline_support)/self.spline_stride)  # splines per frame
+
+        # For computing spline stft (step 1)
         if self.padding=="valid":
             self.T = int(1 + torch.div(self.L - self.N, self.stride, rounding_mode='floor'))    # time steps
-            self.L_useful = (self.N-self.stride)+self.T*self.stride  # we might miss some points in the end
-            self.S = int(1+(self.L_useful-self.spline_support)/self.spline_stride)
-            self.spline_window_starts = self.spline_stride*torch.arange(0, self.S, device=self.device)  # spline offsets from the signal start
-        elif self.padding=="same":
+            L_useful = (self.N-self.stride)+self.T*self.stride  # we might miss some points in the end
+        elif "same" in self.padding:
             self.T = 1 + int(torch.div(self.L, self.stride, rounding_mode="floor"))
-            self.L_useful = self.spline_stride*int(torch.div(self.L, self.spline_stride, rounding_mode="floor"))
+            L_useful = self.spline_stride*int(torch.div(self.L, self.spline_stride, rounding_mode="floor"))  # still might miss some, but possibly less
+            
             self.extraS = int((self.N/2)/self.spline_stride)  # the number of extra splines on each side
+            if self.padding == "same":
+                frame_centers = self.stride*torch.arange(self.T, device=self.device)
+                spline_centers = torch.arange(-self.N/2+self.spline_support/2, frame_centers[-1]+self.N/2-self.spline_support/2+self.spline_stride, self.spline_stride)
+                unfolded_spline_centers = spline_centers.unfold(0, self.s, self.spline_density).T.contiguous()
+                self.fake_stft_mask = (((unfolded_spline_centers-self.spline_support/2)<0) | ((unfolded_spline_centers+self.spline_support/2)>(L_useful-1))).to(self.device)
         else:
             raise ValueError("the padding mode is not known")
-        self.S = int(1+(self.L_useful-self.spline_support)/self.spline_stride)
-        self.spline_window_starts = self.spline_stride*torch.arange(0, self.S, device=self.device)  # spline offsets from the signal start
-        #raise ValueError("F")
-        self.fold_idcs = self.spline_window_starts.unsqueeze(0) + torch.arange(self.spline_support, device=self.device).unsqueeze(1)
+        self.S = int(1+(L_useful-self.spline_support)/self.spline_stride)
+        spline_window_starts = self.spline_stride*torch.arange(0, self.S, device=self.device)  # spline offsets from the signal start
+        # the 2 below can probably be removed
+        self.fold_idcs = spline_window_starts.unsqueeze(0) + torch.arange(self.spline_support, device=self.device).unsqueeze(1)
         self.pad_buffer = torch.zeros((self.B, self.N, self.S), device=self.device)
         #self.frame2splines = torch.arange(0, self.s, device=self.device).reshape(-1, 1) + torch.arange(0, self.T*self.spline_density, self.spline_density, device=self.device)
-        self.modulation_factors = torch.exp(-1j * 2 * torch.pi * torch.arange(self.F, device=self.device).unsqueeze(1) / self.N * self.spline_window_starts.unsqueeze(0))
+        self.modulation_factors = torch.exp(-1j * 2 * torch.pi * torch.arange(self.F, device=self.device).unsqueeze(1) / self.N * spline_window_starts.unsqueeze(0))
         
-        # For expanding the spline stft
-        self.s = int(1+self.spline_density*(self.N-self.spline_support)/self.stride)  # splines per frame
-        
+        # For the coefficients (step 3)
+        offsets = torch.arange(-self.N/2+self.spline_support/2,  # positions of splines in a window relative to the middle
+                            self.N/2-self.spline_support/2+self.spline_stride, 
+                            self.spline_stride, device=self.device) 
+        self.normalized_offsets = offsets / self.N  # offsets normalized to [-0.5, 0.5], used for Hann windows
+        # (S)
+        x = 0.5+self.normalized_offsets
+        x_1mx = (x*(1-x)).unsqueeze(0).unsqueeze(2)
+        # (1, s, 1)
+        # going through logs to avoid numerical issues
+        self.log_x_1mx = torch.log(x_1mx)
+        # (1, s, 1). 
+
+        """if self.padding=="same":
+            # expand to the full size
+            self.log_x_1mx = self.log_x_1mx.repeat(self.F, 1, self.T)
+
+            # set the fake elements to log(0)
+            self.log_x_1mx[:, self.fake_stft_mask] = -torch.inf
+            
+            self.real_stft_mask = ~self.fake_stft_mask"""
+
         # The PARAMETER
         self.window_lengths = nn.Parameter(torch.full((self.F, self.T), self.initial_win_length, dtype=self.dtype, device=self.device), requires_grad=True)
 
@@ -185,35 +210,20 @@ class fastDSTFT(nn.Module):
     # Spline coefficients for building larger windows
     @torch.compile  # speeds up this function by a lot
     def coefficients(self, lambda_):  # get the spline coefficients
-        print("go")
-        tic()
         # The Greville abscissae are the centers of the splines!
-        offsets = torch.arange(-self.N/2+self.spline_support/2,  # positions of splines in a window relative to the middle
-                            self.N/2-self.spline_support/2+self.spline_stride, 
-                            self.spline_stride, device=self.device) 
-        normalized_offsets = offsets / self.N  # offsets normalized to [-0.5, 0.5], used for Hann windows
-
         if self.window_function == 'beta':
-            # (S)
-            x = 0.5+normalized_offsets
-            x_1mx = (x*(1-x)).unsqueeze(0).unsqueeze(2)
-            # (1, s, 1)
-            # going through logs to avoid numerical issues
-            log_x_1mx = torch.log(x_1mx)
-            # (1, s, 1). until here is <1% of this function on cpu
-            toc()
-
             # Calculate the a=b parameter of the Beta distribution (4% of this function on CPU)
             a = 1/2*((3*self.N/lambda_)**2 -1).unsqueeze(1)
-            print(a.shape)
             # (F, 1, T)
 
             # Raise the base to the exponent a (17% of this function on CPU)
-            log_pdf_ish = (a - 1) * log_x_1mx
-            print(log_pdf_ish.shape)
+            log_pdf_ish = (a - 1) * self.log_x_1mx
             # (F, s, T)
 
-            # (new) if some splines are outside of the 
+            # Coefficients for fake spline stfts should be zero to preserve the spectrogram energy (this takes a while actually, about 25% of the function with it)
+            if self.padding == "same":
+                log_pdf_ish.masked_fill_(self.fake_stft_mask.unsqueeze(0), -torch.inf)
+            # (F, s, T)
 
             # Normalize the coefficients to 1 (55% of this function on CPU) and exponentiate back (24% of this function on CPU)
             return torch.exp(log_pdf_ish -log_pdf_ish.logsumexp(dim=1, keepdim=True))  # F.softmax(log_pdf_ish, dim=1)
@@ -260,25 +270,37 @@ class fastDSTFT(nn.Module):
         # (B, spline_support, S)
 
         # Zero-pad each frame to length N (1%, 4% of computation using CPU, GPU)
-        self.pad_buffer[:, :x_unfolded.shape[1], :] = x_unfolded
+        #self.pad_buffer[:, :self.spline_support, :] = x_unfolded
+        self.pad_buffer[:, int(self.N/2-self.spline_support/2):int(self.N/2+self.spline_support/2), :] = x_unfolded
         # (B, N, S)
 
         # FFT the windows. Keep only the first F frequencies. (90%=0.03, 67%=0.017 of computation using CPU, GPU)
         spline_stft = torch.fft.rfft(self.pad_buffer, dim=1)  # now rfft, faster than fft, timings are outdated
         # (B, F, S)
 
+        # this is equivalent. a bit less flexible, but much cleaner. slightly faster. what happens for weird x lengths?
+        """stft_result = torch.stft(
+            x,
+            n_fft=self.N,
+            hop_length=self.spline_stride,
+            window=self.bspline_window,
+            win_length=self.bspline_window.shape[0],
+            return_complex=True,
+            center=True
+        )[:, :, int(self.bspline_window.shape[0]/(2*self.spline_stride)):-int(self.bspline_window.shape[0]/(2*self.spline_stride))]"""
+
         # Modulate the FFTs to compensate for their temporal position (6%=0.002, 14%=0.003 of computation using CPU, GPU)
         spline_stft.mul_(self.modulation_factors)
         # (B, F, S)
-
-        if self.padding == "same":  # we need to add some fake zeros on each end
+        
+        if "same" in self.padding:  # we need to add some fake zeros on each end
             return F.pad(spline_stft, pad=(self.extraS, self.extraS), mode='constant', value=0)
             # (B, F, extraS+S+extraS)
         else:
             return spline_stft
     def stft(self, x):  # timing at B=64
         # Compute preliminary STFT with spline windows (63%, 33% of computation using CPU, GPU)
-        spline_stfts = self.compute_spline_stft(x)
+        spline_stfts = self.compute_spline_stft(x)  # step 1
         # (B, F, S)
   
         # Build tensor of all splines with repetition (<1% of computation)
@@ -287,15 +309,15 @@ class fastDSTFT(nn.Module):
         expanded_spline_stfts = spline_stfts.as_strided(
             size=(self.B, self.F, self.s, self.T),
             stride=(stride_B, stride_F, stride_S, self.spline_density*stride_S),
-        )
+        )  # step 2
         # (B, F, s, T) it thinks it is, but is actually still (B, F, S)->memory saving!
         
         # Get the spline coefficients from the window lengths (4%, 4% of computation using CPU, GPU)
-        coeffs = self.coefficients(self.window_lengths).unsqueeze(0)
+        coeffs = self.coefficients(self.window_lengths).unsqueeze(0)  # step 3
         # (1, F, s, T)
 
         # Calculate the STFT (33%=0.018, 63%=0.037 of computation using CPU, GPU)
-        return self.fast_contraction(expanded_spline_stfts, coeffs)
+        return self.fast_contraction(expanded_spline_stfts, coeffs)  # step 4
         # (B, F, T)
     def fast_contraction(self, expanded_spline_stfts, coeffs):  # wrapper because compile and complex don't like each other
         real, imag = self.combine(expanded_spline_stfts.real, expanded_spline_stfts.imag, coeffs)
