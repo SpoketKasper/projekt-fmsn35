@@ -8,95 +8,197 @@ print(x/x.sum())
 # Raw data including "go" lines
 raw_data = """
 go
-Elapsed time: 0.0289 seconds
-Elapsed time: 0.0297 seconds
+Elapsed time: 0.0039 seconds
+Elapsed time: 0.0009 seconds
+Elapsed time: 0.0076 seconds
 go
-Elapsed time: 0.0294 seconds
-Elapsed time: 0.0284 seconds
+Elapsed time: 0.0038 seconds
+Elapsed time: 0.0008 seconds
+Elapsed time: 0.0164 seconds
 go
-Elapsed time: 0.0281 seconds
-Elapsed time: 0.0259 seconds
+Elapsed time: 0.0041 seconds
+Elapsed time: 0.0008 seconds
+Elapsed time: 0.0076 seconds
 go
-Elapsed time: 0.0279 seconds
-Elapsed time: 0.0263 seconds
+Elapsed time: 0.0036 seconds
+Elapsed time: 0.0008 seconds
+Elapsed time: 0.0075 seconds
 go
-Elapsed time: 0.0282 seconds
-Elapsed time: 0.0266 seconds
+Elapsed time: 0.0039 seconds
+Elapsed time: 0.0008 seconds
+Elapsed time: 0.0075 seconds
 go
-Elapsed time: 0.0300 seconds
-Elapsed time: 0.0261 seconds
+Elapsed time: 0.0039 seconds
+Elapsed time: 0.0008 seconds
+Elapsed time: 0.0132 seconds
 go
-Elapsed time: 0.0306 seconds
-Elapsed time: 0.0296 seconds
+Elapsed time: 0.0037 seconds
+Elapsed time: 0.0010 seconds
+Elapsed time: 0.0090 seconds
 go
-Elapsed time: 0.0297 seconds
-Elapsed time: 0.0306 seconds
+Elapsed time: 0.0040 seconds
+Elapsed time: 0.0008 seconds
+Elapsed time: 0.0077 seconds
 go
-Elapsed time: 0.0511 seconds
-Elapsed time: 0.0477 seconds
+Elapsed time: 0.0040 seconds
+Elapsed time: 0.0008 seconds
+Elapsed time: 0.0082 seconds
 go
-Elapsed time: 0.0346 seconds
-Elapsed time: 0.0316 seconds
+Elapsed time: 0.0041 seconds
+Elapsed time: 0.0028 seconds
+Elapsed time: 0.0080 seconds
 go
-Elapsed time: 0.0338 seconds
-Elapsed time: 0.0324 seconds
+Elapsed time: 0.0038 seconds
+Elapsed time: 0.0008 seconds
+Elapsed time: 0.0076 seconds
 go
-Elapsed time: 0.0483 seconds
-Elapsed time: 0.0498 seconds
+Elapsed time: 0.0042 seconds
+Elapsed time: 0.0008 seconds
+Elapsed time: 0.0111 seconds
 go
-Elapsed time: 0.0314 seconds
-Elapsed time: 0.0306 seconds
+Elapsed time: 0.0038 seconds
+Elapsed time: 0.0008 seconds
+Elapsed time: 0.0080 seconds
 go
-Elapsed time: 0.0316 seconds
-Elapsed time: 0.0338 seconds
+Elapsed time: 0.0042 seconds
+Elapsed time: 0.0008 seconds
+Elapsed time: 0.0091 seconds
 go
-Elapsed time: 0.0355 seconds
-Elapsed time: 0.0309 seconds
+Elapsed time: 0.0050 seconds
+Elapsed time: 0.0010 seconds
+Elapsed time: 0.0113 seconds
 go
-Elapsed time: 0.0389 seconds
-Elapsed time: 0.0326 seconds
+Elapsed time: 0.0038 seconds
+Elapsed time: 0.0009 seconds
+Elapsed time: 0.0108 seconds
 go
-Elapsed time: 0.0334 seconds
-Elapsed time: 0.0299 seconds
+Elapsed time: 0.0043 seconds
+Elapsed time: 0.0009 seconds
+Elapsed time: 0.0119 seconds
 go
-Elapsed time: 0.0324 seconds
-Elapsed time: 0.0283 seconds
+Elapsed time: 0.0043 seconds
+Elapsed time: 0.0009 seconds
+Elapsed time: 0.0096 seconds
 go
-Elapsed time: 0.0312 seconds
-Elapsed time: 0.0272 seconds
+Elapsed time: 0.0050 seconds
+Elapsed time: 0.0009 seconds
+Elapsed time: 0.0117 seconds
 go
-Elapsed time: 0.0314 seconds
-Elapsed time: 0.0266 seconds
+Elapsed time: 0.0042 seconds
+Elapsed time: 0.0009 seconds
+Elapsed time: 0.0116 seconds
 go
-Elapsed time: 0.0307 seconds
-Elapsed time: 0.0270 seconds
+Elapsed time: 0.0041 seconds
+Elapsed time: 0.0010 seconds
+Elapsed time: 0.0149 seconds
 go
-Elapsed time: 0.0303 seconds
-Elapsed time: 0.0269 seconds
+Elapsed time: 0.0041 seconds
+Elapsed time: 0.0009 seconds
+Elapsed time: 0.0085 seconds
 go
-Elapsed time: 0.0313 seconds
-Elapsed time: 0.0264 seconds
+Elapsed time: 0.0045 seconds
+Elapsed time: 0.0009 seconds
+Elapsed time: 0.0090 seconds
 go
-Elapsed time: 0.0303 seconds
-Elapsed time: 0.0277 seconds
+Elapsed time: 0.0042 seconds
+Elapsed time: 0.0018 seconds
+Elapsed time: 0.0074 seconds
 go
-Elapsed time: 0.0310 seconds
-Elapsed time: 0.0274 seconds
+Elapsed time: 0.0039 seconds
+Elapsed time: 0.0008 seconds
+Elapsed time: 0.0074 seconds
 go
-Elapsed time: 0.0321 seconds
-Elapsed time: 0.0274 seconds
+Elapsed time: 0.0059 seconds
+Elapsed time: 0.0015 seconds
+Elapsed time: 0.0107 seconds
 go
-Elapsed time: 0.0310 seconds
-Elapsed time: 0.0286 seconds
+Elapsed time: 0.0044 seconds
+Elapsed time: 0.0009 seconds
+Elapsed time: 0.0091 seconds
 go
-Elapsed time: 0.0309 seconds
-Elapsed time: 0.0273 seconds
+Elapsed time: 0.0039 seconds
+Elapsed time: 0.0008 seconds
+Elapsed time: 0.0074 seconds
 go
-Elapsed time: 0.0323 seconds
-Elapsed time: 0.0277 seconds
+Elapsed time: 0.0040 seconds
+Elapsed time: 0.0008 seconds
+Elapsed time: 0.0086 seconds
 go
-Elapsed time: 0.0307 seconds
-Elapsed time: 0.0289 seconds
+Elapsed time: 0.0045 seconds
+Elapsed time: 0.0008 seconds
+Elapsed time: 0.0083 seconds
+go
+Elapsed time: 0.0043 seconds
+Elapsed time: 0.0009 seconds
+Elapsed time: 0.0083 seconds
+go
+Elapsed time: 0.0038 seconds
+Elapsed time: 0.0008 seconds
+Elapsed time: 0.0083 seconds
+go
+Elapsed time: 0.0044 seconds
+Elapsed time: 0.0008 seconds
+Elapsed time: 0.0094 seconds
+go
+Elapsed time: 0.0038 seconds
+Elapsed time: 0.0008 seconds
+Elapsed time: 0.0073 seconds
+go
+Elapsed time: 0.0038 seconds
+Elapsed time: 0.0008 seconds
+Elapsed time: 0.0074 seconds
+go
+Elapsed time: 0.0041 seconds
+Elapsed time: 0.0008 seconds
+Elapsed time: 0.0072 seconds
+go
+Elapsed time: 0.0039 seconds
+Elapsed time: 0.0008 seconds
+Elapsed time: 0.0077 seconds
+go
+Elapsed time: 0.0037 seconds
+Elapsed time: 0.0008 seconds
+Elapsed time: 0.0083 seconds
+go
+Elapsed time: 0.0042 seconds
+Elapsed time: 0.0009 seconds
+Elapsed time: 0.0074 seconds
+go
+Elapsed time: 0.0039 seconds
+Elapsed time: 0.0008 seconds
+Elapsed time: 0.0078 seconds
+go
+Elapsed time: 0.0037 seconds
+Elapsed time: 0.0008 seconds
+Elapsed time: 0.0073 seconds
+go
+Elapsed time: 0.0040 seconds
+Elapsed time: 0.0009 seconds
+Elapsed time: 0.0075 seconds
+go
+Elapsed time: 0.0040 seconds
+Elapsed time: 0.0008 seconds
+Elapsed time: 0.0074 seconds
+go
+Elapsed time: 0.0037 seconds
+Elapsed time: 0.0008 seconds
+Elapsed time: 0.0075 seconds
+go
+Elapsed time: 0.0042 seconds
+Elapsed time: 0.0008 seconds
+Elapsed time: 0.0073 seconds
+go
+Elapsed time: 0.0043 seconds
+Elapsed time: 0.0009 seconds
+Elapsed time: 0.0072 seconds
+go
+Elapsed time: 0.0043 seconds
+Elapsed time: 0.0008 seconds
+Elapsed time: 0.0075 seconds
+go
+Elapsed time: 0.0043 seconds
+Elapsed time: 0.0008 seconds
+Elapsed time: 0.0072 seconds
 """
 
 # Count the number of "go" blocks (i.e., time classes)
