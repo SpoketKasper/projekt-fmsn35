@@ -1,7 +1,7 @@
 venv/
-.DS_store
-
-##Audio
-.wav
-
+*.DS_store
+.DS_Store
+*.wav
+*.pyc
+*.csv
 differentiable-mel-spectrogram/ray_results/
